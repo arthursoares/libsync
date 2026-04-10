@@ -188,9 +188,21 @@ class DownloadService:
 
             try:
                 await self._download_album(item)
-                item["status"] = "complete"
-                self.db.update_album_status(item["album_db_id"], "complete", downloaded_at=datetime.now().isoformat())
-                await self.event_bus.publish("download_complete", {"item_id": item["id"], "title": item["title"], "artist": item["artist"]})
+
+                # Re-check cancellation: the user may have cancelled while
+                # _download_album was running. The SDK doesn't support mid-
+                # flight interruption, but we can at least avoid marking the
+                # item as "complete" — treat it as cancelled so the UI shows
+                # the correct state and the album status reverts.
+                if item["id"] in self._cancel_requested:
+                    self._cancel_requested.discard(item["id"])
+                    item["status"] = "cancelled"
+                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                    logger.info("Download of %s cancelled after completion", item["title"])
+                else:
+                    item["status"] = "complete"
+                    self.db.update_album_status(item["album_db_id"], "complete", downloaded_at=datetime.now().isoformat())
+                    await self.event_bus.publish("download_complete", {"item_id": item["id"], "title": item["title"], "artist": item["artist"]})
             except Exception as e:
                 logger.exception("Download failed for %s", item["title"])
                 item["status"] = "failed"
@@ -235,11 +247,15 @@ class DownloadService:
             downloads_db = os.path.join(db_dir, db_filename)
 
         config_kwargs: dict = {
-            "output_dir": self.download_path or "/music",
+            "output_dir": (
+                self.db.get_config("downloads_path")
+                or self.download_path
+                or os.environ.get("STREAMRIP_DOWNLOADS_PATH", "/music")
+            ),
             "quality": quality,
             "folder_format": self.db.get_config("folder_format") or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
             "track_format": self.db.get_config("track_format") or "{tracknumber:02d}. {artist} - {title}",
-            "max_connections": self.max_connections,
+            "max_connections": int(self.db.get_config("max_connections") or self.max_connections),
             "embed_cover": self.db.get_config("embed_artwork") != "false",
             "cover_size": self.db.get_config("artwork_size") or "large",
             "source_subdirectories": self.db.get_config("source_subdirectories") in ("true", "1"),

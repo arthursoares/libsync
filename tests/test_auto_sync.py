@@ -252,18 +252,15 @@ class TestRunSyncDownloadNew:
 
         from backend.services.sync import SyncService
 
-        # Library service stubbed out — return one new album
+        # Library service stubbed out — return one new album.
+        # refresh_library now returns new_album_ids directly (the diff
+        # is computed inside refresh_library, not in a separate get_diff
+        # call, to avoid the race where refresh upserts everything first
+        # and the subsequent diff sees nothing new).
         library_service = MagicMock()
         library_service.refresh_library = AsyncMock(
-            return_value={"total": 1, "new": 1}
+            return_value={"total": 1, "new": 1, "new_album_ids": ["new-1"]}
         )
-        # Inject diff: one new album in the streaming service, none in the DB
-        new_album = {
-            "source_album_id": "new-1",
-            "title": "New Album",
-            "artist": "Artist",
-            "source": "qobuz",
-        }
 
         # Pre-create a stub client + spy download service
         client = _mock_client_with_empty_favorites()
@@ -276,14 +273,6 @@ class TestRunSyncDownloadNew:
             library_service=library_service,
             download_service=download_service,
         )
-        # Stub get_diff so we control the new_albums list independent of
-        # the favorites mock above
-        service.get_diff = AsyncMock(return_value={
-            "new_albums": [new_album],
-            "removed_albums": [],
-            "source": "qobuz",
-            "last_sync": None,
-        })
 
         result = await service.run_sync("qobuz", download_new=True)
 
@@ -299,7 +288,7 @@ class TestRunSyncDownloadNew:
 
         library_service = MagicMock()
         library_service.refresh_library = AsyncMock(
-            return_value={"total": 1, "new": 1}
+            return_value={"total": 1, "new": 1, "new_album_ids": ["x"]}
         )
         client = _mock_client_with_empty_favorites()
         download_service = MagicMock()
@@ -311,12 +300,6 @@ class TestRunSyncDownloadNew:
             library_service=library_service,
             download_service=download_service,
         )
-        service.get_diff = AsyncMock(return_value={
-            "new_albums": [{"source_album_id": "x", "title": "T", "artist": "A"}],
-            "removed_albums": [],
-            "source": "qobuz",
-            "last_sync": None,
-        })
 
         result = await service.run_sync("qobuz", download_new=False)
 
