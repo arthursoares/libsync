@@ -139,6 +139,7 @@ class LibraryService:
         existing_ids = {a["source_album_id"] for a in self.db.get_albums(source, limit=100000)}
         now = datetime.now().isoformat()
         new_count = 0
+        new_album_ids: list[str] = []
         for item in all_items:
             album_resp = self._extract_album_data(source, item)
             if album_resp is None:
@@ -146,11 +147,12 @@ class LibraryService:
             is_new = album_resp["source_album_id"] not in existing_ids
             if is_new:
                 new_count += 1
+                new_album_ids.append(album_resp["source_album_id"])
                 album_resp["added_to_library_at"] = now
             self.db.upsert_album(**album_resp)
 
         await self.event_bus.publish("library_updated", {"source": source, "new_count": new_count, "total": len(all_items)})
-        return {"total": len(all_items), "new": new_count}
+        return {"total": len(all_items), "new": new_count, "new_album_ids": new_album_ids}
 
     async def fetch_all_favorites(self, source: str, client) -> list[dict]:
         """Fetch every favorite album for *source* as a list of raw dicts.

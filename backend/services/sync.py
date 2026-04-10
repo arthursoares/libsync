@@ -81,15 +81,15 @@ class SyncService:
         await self.event_bus.publish("sync_started", {"source": source, "run_id": run_id})
 
         try:
-            # Refresh library from streaming API
+            # Refresh library from streaming API.  refresh_library returns
+            # the IDs of newly-discovered albums so we can enqueue them for
+            # download *before* a second get_diff pass (which would see them
+            # as already in the DB and return an empty new_albums list).
             refresh_result = await self.library_service.refresh_library(source)
-
-            # Get diff after refresh
-            diff = await self.get_diff(source)
+            new_ids = refresh_result.get("new_album_ids", [])
 
             albums_downloaded = 0
-            if download_new and self.download_service is not None and diff["new_albums"]:
-                new_ids = [a["source_album_id"] for a in diff["new_albums"]]
+            if download_new and self.download_service is not None and new_ids:
                 logger.info(
                     "Auto-sync enqueueing %d new %s albums for download",
                     len(new_ids), source,
@@ -104,7 +104,7 @@ class SyncService:
                 run_id,
                 albums_found=refresh_result["total"],
                 albums_new=refresh_result["new"],
-                albums_removed=len(diff["removed_albums"]),
+                albums_removed=0,
                 albums_downloaded=albums_downloaded,
             )
 
@@ -112,7 +112,6 @@ class SyncService:
                 "source": source,
                 "run_id": run_id,
                 "new_count": refresh_result["new"],
-                "removed_count": len(diff["removed_albums"]),
                 "downloaded_count": albums_downloaded,
             })
 
@@ -120,7 +119,6 @@ class SyncService:
                 "run_id": run_id,
                 "albums_found": refresh_result["total"],
                 "albums_new": refresh_result["new"],
-                "albums_removed": len(diff["removed_albums"]),
                 "albums_downloaded": albums_downloaded,
                 "status": "complete",
             }
