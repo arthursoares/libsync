@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -31,7 +33,10 @@ jobs:
         key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
 
     - name: Install dependencies
-      run: poetry install
+      run: |
+        poetry install
+        poetry run pip install -e sdks/qobuz_api_client/clients/python
+        poetry run pip install -e sdks/qobuz_api_client/clients/python/tidal
 
     - name: Run unit tests
       run: poetry run pytest tests/ -q --tb=short --ignore=tests/test_e2e_download.py -k "not test_streamrip_versions_match"
@@ -42,6 +47,8 @@ jobs:
     needs: backend-tests
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -56,7 +63,10 @@ jobs:
         virtualenvs-in-project: true
 
     - name: Install dependencies
-      run: poetry install
+      run: |
+        poetry install
+        poetry run pip install -e sdks/qobuz_api_client/clients/python
+        poetry run pip install -e sdks/qobuz_api_client/clients/python/tidal
 
     - name: Run e2e tests
       if: env.QOBUZ_TOKEN != ''
@@ -88,6 +98,8 @@ jobs:
     needs: [backend-tests, frontend-build]
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Build Docker image
       run: docker build -f docker/Dockerfile -t streamrip:test .
