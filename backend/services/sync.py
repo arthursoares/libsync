@@ -124,6 +124,7 @@ class SyncService:
             }
         except Exception as e:
             logger.exception("Sync failed for %s", source)
+            self.db.fail_sync_run(run_id)
             return {"run_id": run_id, "status": "failed", "error": str(e)}
 
     async def get_history(self, source: str, limit: int = 10) -> list[dict]:
