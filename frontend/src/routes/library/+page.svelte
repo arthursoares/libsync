@@ -11,6 +11,7 @@
     loadAlbumDetail,
   } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { isSourceAuthenticated } from '$lib/auth-ui-logic.js';
 
   let albumList = $derived($albums);
   let total = $derived($totalAlbums);
@@ -126,8 +127,7 @@
   async function checkAuth() {
     try {
       const statuses = await api.auth.status();
-      const s = statuses.find((a: any) => a.source === source);
-      isConnected = s?.authenticated ?? false;
+      isConnected = isSourceAuthenticated(statuses, source);
     } catch { /* ignore */ }
   }
 
@@ -376,6 +376,7 @@
     background: var(--canvas-inset);
     color: var(--text-primary);
     outline: none;
+    appearance: none;
     cursor: pointer;
     -webkit-appearance: none;
     padding-right: var(--space-6);

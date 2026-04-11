@@ -37,6 +37,7 @@
   let selected = $state<PlaylistDetail | null>(null);
   let detailLoading = $state(false);
   let detailOpen = $state(false);
+  let detailError = $state('');
 
   async function loadPlaylists() {
     loading = true;
@@ -56,11 +57,13 @@
     selected = { ...p, tracks: [] } as PlaylistDetail;
     detailOpen = true;
     detailLoading = true;
+    detailError = '';
     try {
       const data = await api.library.getPlaylist(source, p.id);
       selected = data;
     } catch (e) {
       console.error('Failed to load playlist detail', e);
+      detailError = e instanceof Error ? e.message : 'Failed to load playlist detail';
     } finally {
       detailLoading = false;
     }
@@ -174,6 +177,10 @@
 
     {#if detailLoading}
       <div class="detail-loading">Loading tracks...</div>
+    {:else if detailError}
+      <div class="empty-state">
+        <p class="empty-text">{detailError}</p>
+      </div>
     {:else if selected.tracks && selected.tracks.length > 0}
       <div class="track-list">
         {#each selected.tracks as track, i (track.id)}

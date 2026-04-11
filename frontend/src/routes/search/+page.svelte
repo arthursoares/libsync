@@ -18,6 +18,7 @@
   let loadingMore = $state(false);
   let hasSearched = $state(false);
   let currentPage = $state(1);
+  let searchError = $state('');
   const PAGE_SIZE = 60;
 
   // ── UI state ──
@@ -64,6 +65,7 @@
       results = [];
       total = 0;
       hasSearched = false;
+      searchError = '';
       return;
     }
     if (append) {
@@ -73,6 +75,7 @@
       currentPage = 1;
       hasSearched = true;
     }
+    searchError = '';
     activeQuery = query.trim();
     try {
       const data = await api.library.search(source, activeQuery, {
@@ -87,6 +90,7 @@
       total = incomingTotal;
     } catch (err) {
       console.error('Search failed', err);
+      searchError = err instanceof Error ? err.message : 'Search failed';
       if (!append) {
         results = [];
         total = 0;
@@ -105,6 +109,7 @@
       results = [];
       total = 0;
       hasSearched = false;
+      searchError = '';
       return;
     }
     debounceTimer = setTimeout(() => runSearch(value), 400);
@@ -201,6 +206,10 @@
   </div>
 </div>
 
+{#if searchError}
+  <div class="error-banner">{searchError}</div>
+{/if}
+
 {#if loading}
   <div class="loading-state">
     <span class="loading-text">Searching {source.charAt(0).toUpperCase() + source.slice(1)}...</span>
@@ -231,6 +240,11 @@
       </button>
     </div>
   {/if}
+{:else if searchError}
+  <div class="empty-state">
+    <span class="empty-icon">!</span>
+    <p class="empty-text">{searchError}</p>
+  </div>
 {:else if hasSearched && searchValue.trim().length > 0}
   <div class="empty-state">
     <span class="empty-icon">◧</span>
@@ -310,6 +324,15 @@
     display: flex;
     gap: var(--space-2);
     align-items: center;
+  }
+
+  .error-banner {
+    border: 2px solid var(--destructive);
+    background: color-mix(in srgb, var(--destructive) 10%, transparent);
+    color: var(--destructive);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-6);
+    font-size: var(--text-sm);
   }
 
   .section-title {

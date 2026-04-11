@@ -6,6 +6,7 @@
   import { onMount } from 'svelte';
   import { connectWebSocket, onEvent } from '$lib/stores/websocket';
   import { api } from '$lib/api/client';
+  import { getSourceAuth, isSourceAuthenticated } from '$lib/auth-ui-logic.js';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { addToast } from '$lib/stores/toast';
@@ -18,8 +19,8 @@
   let downloadCount = $derived($activeCount);
   let authStatuses = $state<any[]>([]);
   let sidebarOpen = $state(false);
-  let sourceAuth = $derived(authStatuses.find(a => a.source === source));
-  let isConnected = $derived(sourceAuth?.authenticated ?? false);
+  let sourceAuth = $derived(getSourceAuth(authStatuses, source));
+  let isConnected = $derived(isSourceAuthenticated(authStatuses, source));
 
   function setSource(s: string) {
     $currentSource = s;

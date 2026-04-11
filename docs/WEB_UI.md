@@ -47,13 +47,13 @@ Key points:
 ### Qobuz (OAuth)
 
 1. Open the **Settings** page.
-2. Click **Log in with Qobuz** — this opens the Qobuz OAuth page in your browser. Sign in and authorize.
+2. Click **Login with Browser** — this opens the Qobuz OAuth page in your browser. Sign in and authorize.
 3. The backend catches the callback on `localhost:11111` and stores the resulting user ID + auth token in the SQLite DB.
 4. Clients are hot-reloaded immediately; the green "Connected" dot appears next to Qobuz.
 
 **Headless / remote hosts** (the browser callback can't reach the server):
 
-1. On your local machine, visit the OAuth URL from the **Log in via URL** button.
+1. On your local machine, visit the OAuth URL from the **Headless Login** button.
 2. Sign in. Instead of catching the callback, copy the full URL you were redirected to (it contains `?code_autorisation=…`).
 3. Paste it into the **Redirect URL** field. The backend extracts the code and exchanges it on your behalf.
 
@@ -75,13 +75,18 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 - Filter by title/artist text or by download status (all / downloaded / not-downloaded)
 - Click an album to open the side detail panel: full track list, per-track download status, cover art, metadata
 - **Refresh Library** — pulls the full favorites list from the streaming service and diffs against local state
-- **Scan Folder** — walks the download directory and reconciles `.streamrip.json` sentinel files against the DB so manually-copied albums get picked up (Qobuz and Tidal both write the same filename, disambiguated by the `source` field inside)
 
 ### Search
 
 - Queries the streaming service directly (not the local library)
-- Results show an `in_library` badge for albums already synced
+- Results carry the current local download status when that album is already known to the DB
 - **Download** button on any result — the backend auto-creates a DB entry for the album before downloading so track statuses persist
+
+### Playlists
+
+- Qobuz-only frontend surface today; Tidal playlist reads are not exposed yet
+- Browse your Qobuz playlists and open a detail panel with the playlist tracks
+- **Download All Albums** queues the distinct album IDs referenced by the playlist's tracks
 
 ### Downloads
 
@@ -100,12 +105,13 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 ### Settings
 
 - **Source credentials** — Qobuz (OAuth + optional `App ID` / `App Secret` overrides), Tidal (device-code OAuth)
-- **Qualities** — independent per-source: 0 LOW, 1 HIGH, 2 LOSSLESS (CD), 3 HI_RES
+- **Qobuz quality** — selectable in the UI; Tidal still uses the stored backend tier/default
 - **Download path**
+- **Scan Downloads** — walks the download directory and reconciles `.streamrip.json` sentinel files against the DB
 - **Folder format** / **Track format** with live preview and sample data
 - **Source subdirectories** — nest under `Qobuz/` and `Tidal/` top-level folders
 - **Disc subdirectories** — multi-disc albums get `Disc N/` per CD
-- **Artwork embedding** + size (small / medium / large)
+- **Artwork embedding** + size (`thumbnail` / `small` / `large` / `original`)
 - **Auto-sync** toggle + interval
 - **Reset Database** — nukes library and history (config preserved) with a two-step confirmation
 
@@ -138,10 +144,12 @@ All endpoints live under `/api` and return JSON. Content-Type is `application/js
 | `/api/library/{source}/albums/{id}` | GET | Album detail with tracks |
 | `/api/library/refresh/{source}` | POST | Full library refresh from the streaming service |
 | `/api/library/search/{source}` | GET | Paginated catalog search — `?q=…&page=1&page_size=60`. Returns the same `{albums, total, limit, offset}` envelope as `/albums`. |
-| `/api/library/scan` | POST | Reconcile `.streamrip.json` sentinels under `downloads_path` against the DB |
+| `/api/library/{source}/playlists` | GET | List playlists for the current source. Currently returns data only for Qobuz. |
+| `/api/library/{source}/playlists/{id}` | GET | Fetch a playlist and its tracks |
 | `/api/downloads/queue` | GET | Current queue with progress |
 | `/api/downloads/queue` | POST | `{"source": "qobuz", "album_ids": [...], "force": false}` — enqueue |
 | `/api/downloads/queue/{id}` | DELETE | Cancel a single queued/running item |
+| `/api/downloads/scan` | POST | Reconcile `.streamrip.json` sentinels under `downloads_path` against the DB |
 | `/api/downloads/cancel` | POST | Cancel everything |
 | `/api/sync/status/{source}` | GET | Diff: new / removed vs local DB + last sync timestamp |
 | `/api/sync/run/{source}` | POST | Trigger a sync run (records a row in `sync_runs`) |
@@ -157,6 +165,8 @@ All endpoints live under `/api` and return JSON. Content-Type is `application/js
 make test          # unit tests — ~1s, no credentials
 make test-unit     # same but verbose
 make lint          # ruff check on backend/
+cd frontend && npm run check
+node --test frontend/tests/*.test.js
 ```
 
 The test suite covers:
@@ -202,4 +212,5 @@ The Dockerfile also COPYs from `sdks/qobuz_api_client/clients/python/`, so rebui
 ## Known gaps
 
 - **Qobuz token refresh** is manual — the Qobuz API doesn't expose a refresh endpoint, so the credentials have to be re-captured via the OAuth flow when they expire.
-- **Playlists** — neither SDK's playlist API is surfaced in the web UI yet. Qobuz SDK has full `PlaylistsAPI` (CRUD); Tidal SDK has `FavoritesAPI.get_tracks` and `CatalogAPI.search_*`. No frontend surface.
+- **Tidal playlists** — the frontend only surfaces playlists for Qobuz. Tidal still shows a “not supported” placeholder on the Playlists page.
+- **Browser E2E** — frontend build/check and small logic tests exist, but there is no Playwright/Cypress browser harness wired into the repo yet.
