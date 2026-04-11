@@ -1,42 +1,61 @@
-# sv
+# Frontend
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit frontend for the streamrip web UI.
 
-## Creating a project
+The frontend is built as a static app and served by the FastAPI backend in production. In local development you can run it separately with Vite and point it at a running backend.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Commands
 
-```sh
-# create a new project
-npx sv create my-app
-```
+From `frontend/`:
 
-To recreate this project with the same configuration:
-
-```sh
-# recreate this project
-npx sv@0.14.1 create --template minimal --types ts --no-install .
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
+```bash
+npm install
 npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
-
-```sh
 npm run build
+npm run check
 ```
 
-You can preview the production build with `npm run preview`.
+From the repo root, the lightweight frontend logic tests can be run with:
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+```bash
+node --test frontend/tests/*.test.js
+```
+
+## Local development
+
+Typical split setup:
+
+1. Start the backend from the repo root:
+
+   ```bash
+   make dev-backend
+   ```
+
+2. In another shell, start the frontend:
+
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+
+The Vite dev server is for frontend iteration only. Production builds are emitted to `frontend/build` and copied into `backend/static/` by the root `Makefile`.
+
+## Structure
+
+```text
+frontend/
+├── src/routes/              top-level pages (library, search, playlists, downloads, sync, settings)
+├── src/lib/components/      reusable UI pieces
+├── src/lib/stores/          shared reactive state (library, downloads, websocket, toast)
+├── src/lib/api/             API client and error helpers
+├── src/lib/design-system/   tokens and shared visual primitives
+└── tests/                   small frontend logic tests run with node:test
+```
+
+## Current testing scope
+
+- `npm run build` verifies the app compiles for production
+- `npm run check` runs `svelte-check`
+- `node --test frontend/tests/*.test.js` covers small shared logic helpers
+
+There is currently no browser e2e harness wired into the frontend package.
