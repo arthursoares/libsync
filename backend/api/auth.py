@@ -53,7 +53,7 @@ async def qobuz_oauth_callback(request: Request, body: OAuthCodeRequest):
         creds = await exchange_code(body.code)
     except Exception as e:
         logger.exception("OAuth code exchange failed")
-        return {"error": str(e)}, 400
+        raise HTTPException(status_code=400, detail=str(e))
 
     db = request.app.state.db
     db.set_config("qobuz_token", creds["user_auth_token"])
@@ -91,7 +91,7 @@ async def qobuz_oauth_from_url(request: Request, body: OAuthRedirectRequest):
         creds = await exchange_code(code)
     except Exception as e:
         logger.exception("OAuth URL exchange failed")
-        return {"error": str(e)}, 400
+        raise HTTPException(status_code=400, detail=str(e))
 
     db = request.app.state.db
     db.set_config("qobuz_token", creds["user_auth_token"])

@@ -39,6 +39,20 @@ class TestAlbums:
         album = db.get_album(id1)
         assert album["title"] == "New Title"
 
+    def test_upsert_preserves_added_to_library_at_when_omitted(self, db):
+        album_id = db.upsert_album(
+            "qobuz",
+            "abc123",
+            "Old Title",
+            "Artist",
+            added_to_library_at="2026-04-01T10:00:00",
+        )
+
+        db.upsert_album("qobuz", "abc123", "New Title", "Artist")
+
+        album = db.get_album(album_id)
+        assert album["added_to_library_at"] == "2026-04-01T10:00:00"
+
     def test_get_albums_with_filter(self, db):
         db.upsert_album("qobuz", "a1", "Album A", "Artist A")
         db.upsert_album("qobuz", "a2", "Album B", "Artist B")
@@ -99,6 +113,15 @@ class TestSyncRuns:
         assert len(history) == 1
         assert history[0]["albums_new"] == 5
         assert history[0]["status"] == "complete"
+
+    def test_fail_sync_run(self, db):
+        run_id = db.create_sync_run("qobuz")
+        db.fail_sync_run(run_id)
+
+        history = db.get_sync_history("qobuz")
+        assert len(history) == 1
+        assert history[0]["status"] == "failed"
+        assert history[0]["completed_at"] is not None
 
 
 class TestConfig:

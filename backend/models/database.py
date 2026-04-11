@@ -164,7 +164,10 @@ class AppDatabase:
                      genre=excluded.genre, track_count=excluded.track_count,
                      duration_seconds=excluded.duration_seconds,
                      cover_url=excluded.cover_url, quality=excluded.quality,
-                     added_to_library_at=excluded.added_to_library_at
+                     added_to_library_at=COALESCE(
+                         excluded.added_to_library_at,
+                         albums.added_to_library_at
+                     )
                 """,
                 (
                     source, source_album_id, title, artist, release_date,
@@ -352,6 +355,14 @@ class AppDatabase:
                    WHERE id=?""",
                 (datetime.now().isoformat(), albums_found, albums_new,
                  albums_removed, albums_downloaded, run_id),
+            )
+
+    def fail_sync_run(self, run_id: int):
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sync_runs SET completed_at=?, status='failed'
+                   WHERE id=?""",
+                (datetime.now().isoformat(), run_id),
             )
 
     def get_sync_history(self, source: str, limit: int = 10) -> list[dict]:

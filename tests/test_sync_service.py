@@ -54,3 +54,23 @@ class TestSyncService:
         history = await service.get_history("qobuz")
         assert len(history) == 1
         assert history[0]["status"] == "complete"
+
+    async def test_run_sync_marks_history_failed_when_refresh_errors(self, db, event_bus):
+        class FailingLibraryService(LibraryService):
+            async def refresh_library(self, source):
+                raise RuntimeError("boom")
+
+        service = SyncService(
+            db,
+            event_bus,
+            clients={},
+            library_service=FailingLibraryService(db, event_bus, {}),
+        )
+
+        result = await service.run_sync("qobuz")
+        assert result["status"] == "failed"
+
+        history = await service.get_history("qobuz")
+        assert len(history) == 1
+        assert history[0]["status"] == "failed"
+        assert history[0]["completed_at"] is not None
