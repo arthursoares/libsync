@@ -1,6 +1,7 @@
 """Tests for API routes."""
 import pytest
 from httpx import ASGITransport, AsyncClient
+from unittest.mock import AsyncMock, patch
 from backend.main import create_app
 
 
@@ -94,6 +95,19 @@ class TestAuthOAuthRoutes:
         data = resp.json()
         assert "url" in data
         assert "qobuz.com" in data["url"]
+
+    async def test_oauth_from_url_returns_400_on_exchange_failure(self, client):
+        with patch("qobuz.auth.extract_code_from_url", return_value="code"), patch(
+            "qobuz.auth.exchange_code",
+            new=AsyncMock(side_effect=RuntimeError("bad code")),
+        ):
+            resp = await client.post(
+                "/api/auth/qobuz/oauth-from-url",
+                json={"redirect_url": "https://example.com/callback?code=bad"},
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "bad code"
 
 
 class TestConfigReload:

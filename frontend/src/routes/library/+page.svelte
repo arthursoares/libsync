@@ -175,6 +175,7 @@
     const _s = source;
     const _so = sort;
     const _f = filter;
+    checkAuth();
     fetchAlbums();
   });
 
