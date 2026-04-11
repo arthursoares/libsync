@@ -12,11 +12,12 @@ Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accesse
 - **Album detail** — full track list, bit-depth / sample-rate / codec info, per-track download status
 - **Search** — queries the streaming services directly; results show whether each album is already in your library
 - **Downloads** — queue albums from the library or search, with real-time per-track progress pushed over WebSocket
+- **Playlists** — browse Qobuz playlists and queue all referenced albums from a playlist detail panel
 - **Sync** — manual refresh or scheduled auto-sync to keep local library in step with the streaming service
 - **Custom paths** — folder/track format templates with live preview in Settings (`{albumartist}`, `{title}`, `{container}`, `{bit_depth}`, `{sampling_rate}`, etc.)
 - **Filesystem dedup** — a `.streamrip.json` sentinel file per album folder so re-scans and reset-database operations don't re-download work you already have
 - **Artwork embedding** — cover art baked into tags at configurable resolution
-- **OAuth login** for Qobuz (browser flow + headless URL-paste flow for remote hosts)
+- **OAuth login** for Qobuz and Tidal (browser/device flows, including a headless URL-paste flow for Qobuz)
 - **Per-source dedup database** so Qobuz and Tidal track IDs never collide
 
 ## Requirements
@@ -75,16 +76,18 @@ Separate targets if you want more control:
 - `make dev-frontend` — frontend only with Vite hot-reload, proxied to a running backend
 - `make test` — unit tests (no credentials needed; ~1s)
 - `make lint` — ruff check on `backend/`
+- `cd frontend && npm run check` — Svelte typecheck / diagnostics
+- `node --test frontend/tests/*.test.js` — lightweight frontend logic tests
 - `make docker` — build and run the Docker image
 
 ## First-time setup
 
 1. Open http://localhost:8080 → **Settings**.
-2. **Qobuz** — click **Log in with Qobuz** to run the OAuth flow. On a remote/headless host, use **Log in via URL** instead: run the flow on your local machine, copy the redirect URL, paste it into the box.
-3. **Tidal** — currently requires manually setting your access token, refresh token, user ID, and country code. The Tidal SDK supports the device-code OAuth flow, but it isn't wired into the Settings UI yet (PRs welcome).
+2. **Qobuz** — click **Login with Browser** to run the OAuth flow. On a remote/headless host, use **Headless Login** instead: run the flow on a machine with a browser, copy the redirect URL, paste it into the box.
+3. **Tidal** — click **Connect Tidal** to start the device-code OAuth flow. The Settings page opens the approval URL and polls automatically until authorization completes.
 4. Set **Download Path** to `/music` (Docker) or your preferred local path.
-5. Choose **Quality** — 0 = LOW, 1 = HIGH, 2 = LOSSLESS (CD), 3 = HI_RES (Qobuz HiRes, Tidal MQA).
-6. Tweak **Folder Format** and **Track Format** if you don't like the defaults. The Settings page has a live preview.
+5. Choose your **Qobuz Quality** tier and adjust folder / track format templates if needed. The Settings page has a live preview.
+6. Optional: use **Scan Downloads** if you already have `.streamrip.json` album folders on disk and want to reconcile them into the database.
 7. Click **Save**.
 8. Go to **Library** → **Refresh Library** to pull in your favorites.
 
@@ -92,7 +95,7 @@ Separate targets if you want more control:
 
 `backend/` is a FastAPI app serving both a REST API and a WebSocket channel. `frontend/` is a SvelteKit app compiled to static HTML/CSS/JS and served by the backend. State lives in a single SQLite database (`backend/models/database.py`) — albums, tracks, config, sync history. Streaming-service access goes through [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client), consumed as a git submodule at `sdks/qobuz_api_client/`, which provides two separate Python packages: `qobuz` and `tidal`. Each exposes an `AlbumDownloader` with progress callbacks that the backend wires to WebSocket events. There is no CLI, no TOML config file, no hidden process — everything the app does is controlled from the Settings page and persisted in the SQLite DB.
 
-For more detail see [`docs/WEB_UI.md`](docs/WEB_UI.md) and [`CLAUDE.md`](CLAUDE.md).
+For more detail see [`docs/WEB_UI.md`](docs/WEB_UI.md), [`frontend/README.md`](frontend/README.md), and [`CLAUDE.md`](CLAUDE.md).
 
 ## Repo layout
 

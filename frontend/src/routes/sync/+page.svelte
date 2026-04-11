@@ -15,9 +15,11 @@
   let removedAlbums = $state<any[]>([]);
   let lastSync = $state<string | null>(null);
   let syncHistory = $state<any[]>([]);
+  let syncError = $state('');
 
   async function loadSyncStatus() {
     loading = true;
+    syncError = '';
     try {
       const diff = await fetch(`/api/sync/status/${source}`).then(r => r.json());
       newAlbums = (diff.new_albums || []).map((a: any, i: number) => ({
@@ -49,6 +51,7 @@
       syncHistory = history || [];
     } catch (err) {
       console.error('Failed to load sync status', err);
+      syncError = err instanceof Error ? err.message : 'Failed to load sync status';
     } finally {
       loading = false;
     }
@@ -57,12 +60,19 @@
   async function handleSyncNow() {
     syncing = true;
     syncResult = null;
+    syncError = '';
     try {
       const result = await fetch(`/api/sync/run/${source}`, { method: 'POST' }).then(r => r.json());
-      syncResult = `Synced: ${result.albums_found || 0} albums, ${result.albums_new || 0} new`;
+      if (result.status === 'failed') {
+        syncResult = 'Sync failed';
+        syncError = result.error || 'Sync failed';
+      } else {
+        syncResult = `Synced: ${result.albums_found || 0} albums, ${result.albums_new || 0} new`;
+      }
       await loadSyncStatus();
     } catch (err) {
       syncResult = 'Sync failed';
+      syncError = err instanceof Error ? err.message : 'Sync failed';
       console.error('Sync failed', err);
     } finally {
       syncing = false;
@@ -82,7 +92,8 @@
     return `${Math.floor(hours / 24)} days ago`;
   }
 
-  onMount(() => {
+  $effect(() => {
+    const _s = source;
     loadSyncStatus();
   });
 </script>
@@ -105,6 +116,10 @@
     </button>
   </div>
 </div>
+
+{#if syncError}
+  <div class="error-banner">{syncError}</div>
+{/if}
 
 <div class="stats-row">
   <div class="stat-card">
@@ -170,6 +185,7 @@
   .page-subtitle { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-tertiary); letter-spacing: var(--tracking-mono); }
   .header-actions { display: flex; gap: var(--space-3); align-items: center; }
   .sync-result { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--positive); letter-spacing: var(--tracking-mono); }
+  .error-banner { border: 2px solid var(--destructive); background: color-mix(in srgb, var(--destructive) 10%, transparent); color: var(--destructive); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-6); font-size: var(--text-sm); }
 
   .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); margin-bottom: var(--space-6); }
   .stat-card { border: 2px solid var(--border); padding: var(--space-4); background: var(--canvas-raised); box-shadow: var(--shadow-sm); }

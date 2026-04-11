@@ -14,12 +14,23 @@
   let downloadedTracks = $derived(
     $queue.reduce((sum: number, i: any) => sum + (i.tracks_done ?? 0), 0)
   );
+  let confirmCancelAll = $state(false);
+  let cancellingAll = $state(false);
+  let cancelAllMessage = $state<string | null>(null);
 
   async function cancelAll() {
+    cancellingAll = true;
+    cancelAllMessage = null;
     try {
       await api.downloads.cancelAll();
+      confirmCancelAll = false;
+      cancelAllMessage = 'Cancelling active downloads';
+      setTimeout(() => { cancelAllMessage = null; }, 4000);
     } catch (e) {
       console.error('Failed to cancel all downloads', e);
+      cancelAllMessage = e instanceof Error ? e.message : 'Failed to cancel all downloads';
+    } finally {
+      cancellingAll = false;
     }
   }
 
@@ -47,7 +58,23 @@
         {active} active · {completedItems.length} completed today
       </div>
     </div>
-    <button class="btn btn-destructive btn-sm" onclick={cancelAll}>✕ Cancel All</button>
+    <div class="header-actions">
+      {#if cancelAllMessage}
+        <span class="cancel-all-message">{cancelAllMessage}</span>
+      {/if}
+      {#if confirmCancelAll}
+        <button class="btn btn-destructive btn-sm" onclick={cancelAll} disabled={cancellingAll}>
+          {#if cancellingAll}Cancelling...{:else}Confirm Cancel All{/if}
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick={() => confirmCancelAll = false} disabled={cancellingAll}>
+          Keep Queue
+        </button>
+      {:else}
+        <button class="btn btn-destructive btn-sm" onclick={() => confirmCancelAll = true} disabled={activeItems.length === 0}>
+          ✕ Cancel All
+        </button>
+      {/if}
+    </div>
   </div>
 
   <div class="stats-row">
@@ -108,6 +135,17 @@
     align-items: baseline;
     justify-content: space-between;
     margin-bottom: var(--space-6);
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .cancel-all-message {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    letter-spacing: var(--tracking-mono);
   }
 
   .page-title {

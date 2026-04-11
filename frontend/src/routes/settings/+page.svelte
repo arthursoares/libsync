@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
+  import {
+    isSourceAuthenticated,
+  } from '$lib/auth-ui-logic.js';
 
   // Config state
   let qobuzUserId = $state('');
@@ -159,6 +162,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ redirect_url: headlessRedirectUrl.trim() }),
       });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || err.error || 'OAuth failed');
+      }
       const data = await resp.json();
       if (data.success) {
         qobuzUserId = String(data.user_id);
@@ -169,7 +176,7 @@
         const config = await api.config.get();
         qobuzAuthToken = config.qobuz_token ?? '';
       } else {
-        oauthError = data.error || 'OAuth failed';
+        oauthError = data.detail || data.error || 'OAuth failed';
       }
     } catch (e: any) {
       oauthError = e?.message ?? 'Failed to exchange OAuth code';
@@ -280,10 +287,8 @@
         // Check actual auth status, not just whether token exists
         try {
           const statuses = await api.auth.status();
-          const qobuz = statuses.find((s: any) => s.source === 'qobuz');
-          const tidal = statuses.find((s: any) => s.source === 'tidal');
-          qobuzConnected = qobuz?.authenticated ?? false;
-          tidalConnected = tidal?.authenticated ?? false;
+          qobuzConnected = isSourceAuthenticated(statuses, 'qobuz');
+          tidalConnected = isSourceAuthenticated(statuses, 'tidal');
         } catch {
           qobuzConnected = !!config.qobuz_token;
           tidalConnected = !!config.tidal_access_token;
@@ -334,10 +339,8 @@
       // Refresh auth status after save (backend hot-reloads clients)
       try {
         const statuses = await api.auth.status();
-        const qobuz = statuses.find((s: any) => s.source === 'qobuz');
-        const tidal = statuses.find((s: any) => s.source === 'tidal');
-        qobuzConnected = qobuz?.authenticated ?? false;
-        tidalConnected = tidal?.authenticated ?? false;
+        qobuzConnected = isSourceAuthenticated(statuses, 'qobuz');
+        tidalConnected = isSourceAuthenticated(statuses, 'tidal');
       } catch {
         // ignore auth check failure
       }
@@ -496,9 +499,16 @@
       <div class="settings-label">Download Booklets</div>
       <div class="settings-label-sub">Download PDF booklets included with albums</div>
     </div>
-    <div class="toggle-track" class:on={qobuzDownloadBooklets} onclick={() => qobuzDownloadBooklets = !qobuzDownloadBooklets}>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={qobuzDownloadBooklets}
+      onclick={() => qobuzDownloadBooklets = !qobuzDownloadBooklets}
+      aria-pressed={qobuzDownloadBooklets}
+      aria-label="Toggle Qobuz booklet downloads"
+    >
       <div class="toggle-thumb"></div>
-    </div>
+    </button>
   </div>
 </div>
 
@@ -649,18 +659,32 @@
       <div class="settings-label">Source Subdirectories</div>
       <div class="settings-label-sub">Put albums in Qobuz/, Tidal/ subfolders</div>
     </div>
-    <div class="toggle-track" class:on={sourceSubdirectories} onclick={() => sourceSubdirectories = !sourceSubdirectories}>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={sourceSubdirectories}
+      onclick={() => sourceSubdirectories = !sourceSubdirectories}
+      aria-pressed={sourceSubdirectories}
+      aria-label="Toggle source subdirectories"
+    >
       <div class="toggle-thumb"></div>
-    </div>
+    </button>
   </div>
   <div class="settings-row" style="border-bottom: none;">
     <div>
       <div class="settings-label">Disc Subdirectories</div>
       <div class="settings-label-sub">Create Disc N subfolders for multi-disc albums</div>
     </div>
-    <div class="toggle-track" class:on={discSubdirectories} onclick={() => discSubdirectories = !discSubdirectories}>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={discSubdirectories}
+      onclick={() => discSubdirectories = !discSubdirectories}
+      aria-pressed={discSubdirectories}
+      aria-label="Toggle disc subdirectories"
+    >
       <div class="toggle-thumb"></div>
-    </div>
+    </button>
   </div>
 </div>
 
@@ -674,9 +698,16 @@
       <div class="settings-label">Embed Artwork</div>
       <div class="settings-label-sub">Write cover art into audio file tags</div>
     </div>
-    <div class="toggle-track" class:on={embedArtwork} onclick={() => embedArtwork = !embedArtwork}>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={embedArtwork}
+      onclick={() => embedArtwork = !embedArtwork}
+      aria-pressed={embedArtwork}
+      aria-label="Toggle embedded artwork"
+    >
       <div class="toggle-thumb"></div>
-    </div>
+    </button>
   </div>
   <div class="settings-row" style="border-bottom: none;">
     <div>
@@ -860,6 +891,7 @@
     background: var(--canvas-inset);
     color: var(--text-primary);
     outline: none;
+    appearance: none;
     -webkit-appearance: none;
     width: 100%;
     cursor: pointer;
@@ -882,6 +914,7 @@
     border-radius: 0;
     padding: 0;
     flex-shrink: 0;
+    appearance: none;
   }
 
   .toggle-track.on {
