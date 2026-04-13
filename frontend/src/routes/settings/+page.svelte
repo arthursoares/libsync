@@ -118,20 +118,14 @@
     oauthLoading = true;
     oauthError = '';
     try {
-      const resp = await fetch('/api/auth/qobuz/oauth-url');
+      const origin = window.location.origin;
+      const resp = await fetch(`/api/auth/qobuz/oauth-url?origin=${encodeURIComponent(origin)}`);
       const data = await resp.json();
-      const oauthUrl = data.url;
-
-      // Open OAuth URL in new tab
-      const popup = window.open(oauthUrl, '_blank');
-
-      // Listen for the callback — the OAuth redirect goes to localhost:11111
-      // which won't work in Docker. Show a message to paste the URL instead.
-      oauthError = 'After logging in, if the page doesn\'t load, copy the URL and use "Headless Login"';
-      showHeadlessInput = true;
+      // Redirect in the same window — the backend callback will redirect
+      // back to /settings?oauth=success after exchanging the code.
+      window.location.href = data.url;
     } catch (e: any) {
       oauthError = e?.message ?? 'Failed to start OAuth';
-    } finally {
       oauthLoading = false;
     }
   }
@@ -140,9 +134,9 @@
     oauthLoading = true;
     oauthError = '';
     try {
-      const resp = await fetch('/api/auth/qobuz/oauth-url');
+      const origin = window.location.origin;
+      const resp = await fetch(`/api/auth/qobuz/oauth-url?origin=${encodeURIComponent(origin)}`);
       const data = await resp.json();
-      // Show the URL and input for redirect URL
       showHeadlessInput = true;
       oauthError = `Open this URL: ${data.url}`;
     } catch (e: any) {
@@ -275,6 +269,18 @@
   });
 
   onMount(async () => {
+    // Handle OAuth redirect result
+    const params = new URLSearchParams(window.location.search);
+    const oauthResult = params.get('oauth');
+    if (oauthResult === 'success') {
+      oauthError = '';
+      // Clean up URL params
+      window.history.replaceState({}, '', '/settings');
+    } else if (oauthResult === 'error') {
+      oauthError = `Login failed: ${params.get('reason') ?? 'unknown error'}`;
+      window.history.replaceState({}, '', '/settings');
+    }
+
     try {
       const config = await api.config.get();
       if (config) {

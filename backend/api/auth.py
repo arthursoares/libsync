@@ -1,8 +1,10 @@
 """Auth API routes."""
 
 import logging
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -34,10 +36,52 @@ async def auth_status(request: Request):
 
 
 @router.get("/qobuz/oauth-url")
-async def qobuz_oauth_url(port: int = 11111):
-    """Get the Qobuz OAuth URL for browser login."""
-    from qobuz.auth import get_oauth_url
-    return {"url": get_oauth_url(port)}
+async def qobuz_oauth_url(origin: str = ""):
+    """Get the Qobuz OAuth URL for browser login.
+
+    The frontend passes ``window.location.origin`` so the redirect URL
+    points back to wherever the user is actually browsing from — works
+    in Docker, behind reverse proxies, and on non-default ports.
+    """
+    from qobuz.auth import APP_ID
+
+    if not origin:
+        # Fallback: assume the caller is on localhost:11111
+        origin = "http://localhost:11111"
+
+    redirect_url = f"{origin}/api/auth/qobuz/callback"
+    params = urlencode({"ext_app_id": APP_ID, "redirect_url": redirect_url})
+    return {"url": f"https://www.qobuz.com/signin/oauth?{params}"}
+
+
+@router.get("/qobuz/callback")
+async def qobuz_oauth_callback_redirect(request: Request, code_autorisation: str = ""):
+    """Handle the OAuth redirect from Qobuz.
+
+    Qobuz redirects here with ``?code_autorisation=…``.  We exchange the
+    code, persist credentials, reload clients, then redirect the browser
+    back to the Settings page with a success/error query param.
+    """
+    from qobuz.auth import exchange_code
+
+    if not code_autorisation:
+        return RedirectResponse("/settings?oauth=error&reason=missing_code")
+
+    try:
+        creds = await exchange_code(code_autorisation)
+    except Exception:
+        logger.exception("OAuth code exchange failed")
+        return RedirectResponse("/settings?oauth=error&reason=exchange_failed")
+
+    db = request.app.state.db
+    db.set_config("qobuz_token", creds["user_auth_token"])
+    db.set_config("qobuz_user_id", str(creds["user_id"]))
+    db.set_config("qobuz_app_id", creds["app_id"])
+
+    from .config import _reload_clients
+    await _reload_clients(request)
+
+    return RedirectResponse(f"/settings?oauth=success")
 
 
 class OAuthCodeRequest(BaseModel):
