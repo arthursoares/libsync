@@ -121,3 +121,13 @@ async def _reload_clients(request: Request):
     request.app.state.download_service.clients = clients
     request.app.state.sync_service.clients = clients
     request.app.state._clients_ref = clients
+
+    # Re-evaluate auto-sync now that a source may have just become available.
+    # Common path: user enables auto-sync before authenticating; the initial
+    # _start_auto_sync_if_enabled at startup skipped because clients was
+    # empty.  Without this re-check the loop would never start until the
+    # user toggled the setting again or restarted the app.
+    from ..main import _start_auto_sync_if_enabled
+    _start_auto_sync_if_enabled(
+        db, request.app.state.sync_service, clients
+    )
