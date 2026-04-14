@@ -1,12 +1,14 @@
 """Tests for SyncService."""
 import os
 import tempfile
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from backend.models.database import AppDatabase
-from backend.services.sync import SyncService
 from backend.services.event_bus import EventBus
 from backend.services.library import LibraryService
+from backend.services.sync import SyncService
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 """Tests for the SPA static-file catch-all route in backend.main."""
-import os
 import pytest
+
 from backend.main import create_app
 
 

@@ -81,7 +81,7 @@ async def qobuz_oauth_callback_redirect(request: Request, code_autorisation: str
     from .config import _reload_clients
     await _reload_clients(request)
 
-    return RedirectResponse(f"/settings?oauth=success")
+    return RedirectResponse("/settings?oauth=success")
 
 
 class OAuthCodeRequest(BaseModel):

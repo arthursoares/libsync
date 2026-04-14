@@ -1,7 +1,7 @@
 """Test that the FastAPI app starts and serves basic routes."""
 
-import pytest
 from httpx import ASGITransport, AsyncClient
+
 from backend.main import create_app
 
 

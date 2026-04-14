@@ -20,8 +20,9 @@ Scenario: Cancel marks a pending item as cancelled
 
 import os
 import tempfile
+
 import pytest
-from unittest.mock import AsyncMock
+
 from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus

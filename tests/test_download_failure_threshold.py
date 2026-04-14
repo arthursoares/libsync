@@ -23,7 +23,6 @@ from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

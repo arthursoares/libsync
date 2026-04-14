@@ -25,7 +25,6 @@ from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -117,7 +116,7 @@ def _make_item(db, source: str, source_album_id: str, force: bool) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# DownloadConfig: skip_downloaded + downloads_db_path
+# Section: DownloadConfig — skip_downloaded and downloads_db_path
 # ---------------------------------------------------------------------------
 
 

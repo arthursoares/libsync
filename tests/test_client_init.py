@@ -2,11 +2,12 @@
 
 import os
 import tempfile
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from backend.models.database import AppDatabase
+import pytest
+
 from backend.main import _init_clients
+from backend.models.database import AppDatabase
 
 
 @pytest.fixture
@@ -35,13 +36,13 @@ class TestInitClients:
         db.set_config("qobuz_token", "fake-token")
         db.set_config("qobuz_user_id", "12345")
 
-        with patch("qobuz.QobuzClient") as MockClient:
-            MockClient.return_value = MagicMock()
+        with patch("qobuz.QobuzClient") as mock_client:
+            mock_client.return_value = MagicMock()
             clients = _init_clients(db)
 
         assert "qobuz" in clients
-        MockClient.assert_called_once()
-        call_kwargs = MockClient.call_args[1]
+        mock_client.assert_called_once()
+        call_kwargs = mock_client.call_args[1]
         assert call_kwargs["user_auth_token"] == "fake-token"
 
     def test_handles_import_error_gracefully(self, db):

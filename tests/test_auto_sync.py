@@ -21,7 +21,6 @@ from backend.services.event_bus import EventBus
 from backend.services.library import LibraryService
 from backend.services.sync import SyncService
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
