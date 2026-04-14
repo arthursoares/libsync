@@ -53,7 +53,7 @@ class LibraryService:
     async def _fetch_qobuz_tracks_sdk(self, client, source_album_id, album_id):
         """Fetch tracks from Qobuz using SDK client."""
         try:
-            album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
+            _album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
         except Exception:
             logger.exception("Failed to fetch Qobuz album %s via SDK", source_album_id)
             return []

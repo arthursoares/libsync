@@ -327,7 +327,10 @@ class DownloadService:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(event_bus.publish("download_progress", {
+                    # Fire-and-forget — progress events are best-effort; if
+                    # publish fails the next callback will retry.  Discarding
+                    # the task ref here is intentional.
+                    loop.create_task(event_bus.publish("download_progress", {  # noqa: RUF006
                         "item_id": queue_item["id"],
                         "status": "downloading",
                         "tracks_done": queue_item.get("tracks_done", 0),
