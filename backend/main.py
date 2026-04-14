@@ -114,9 +114,16 @@ def _start_auto_sync_if_enabled(db: AppDatabase, sync_service: "SyncService", cl
     Picks the first connected source (qobuz or tidal) — auto-sync is
     single-source for now since the UI doesn't expose a per-source
     toggle.  No-op if no source is connected or the flag is off.
+
+    Idempotent: if a loop is already running for this service, returns
+    without re-starting it.  Callers that *want* a restart (e.g. interval
+    change in settings) must call ``sync_service.stop_auto_sync()`` first.
     """
     enabled_raw = db.get_config("auto_sync_enabled") or "false"
     if enabled_raw.lower() not in ("true", "1", "yes"):
+        return
+
+    if sync_service._auto_sync_task and not sync_service._auto_sync_task.done():
         return
 
     interval_raw = db.get_config("auto_sync_interval")
