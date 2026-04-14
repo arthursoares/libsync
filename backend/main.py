@@ -311,11 +311,16 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.exists(static_dir):
+        static_root = os.path.realpath(static_dir)
+
         @app.get("/{path:path}")
         async def serve_frontend(path: str):
-            file_path = os.path.join(static_dir, path)
-            if os.path.isfile(file_path):
-                return FileResponse(file_path)
-            return FileResponse(os.path.join(static_dir, "index.html"))
+            index = os.path.join(static_root, "index.html")
+            requested = os.path.realpath(os.path.join(static_root, path))
+            if requested != static_root and not requested.startswith(static_root + os.sep):
+                return FileResponse(index)
+            if os.path.isfile(requested):
+                return FileResponse(requested)
+            return FileResponse(index)
 
     return app
