@@ -3,6 +3,7 @@ name: Tests
 on:
   push:
     branches: [main, dev, feature/*]
+    tags: ['v*']
   pull_request:
     branches: [main, dev]
 
@@ -93,13 +94,62 @@ jobs:
     - name: Build frontend
       run: cd frontend && npm run build
 
-  docker-build:
+  docker-publish:
     runs-on: ubuntu-latest
     needs: [backend-tests, frontend-build]
+    permissions:
+      contents: read
+      packages: write
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    - name: Build Docker image
-      run: docker build -f docker/Dockerfile -t streamrip:test .
+    # Push only for same-repo events. PRs from forks get a build-only
+    # verification because their GITHUB_TOKEN has read-only package scope.
+    - name: Decide whether to push
+      id: push
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" && \
+              "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+          echo "push=false" >> $GITHUB_OUTPUT
+        else
+          echo "push=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GHCR
+      if: steps.push.outputs.push == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract image metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr,prefix=pr-
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix=sha-,format=short
+        flavor: |
+          latest=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: docker/Dockerfile
+        push: ${{ steps.push.outputs.push == 'true' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
