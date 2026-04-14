@@ -25,8 +25,14 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
 
 
 class DownloadService:
-    def __init__(self, db: AppDatabase, event_bus: EventBus, clients: dict,
-                 download_path: str, max_connections: int = 6):
+    def __init__(
+        self,
+        db: AppDatabase,
+        event_bus: EventBus,
+        clients: dict,
+        download_path: str,
+        max_connections: int = 6,
+    ):
         self.db = db
         self.event_bus = event_bus
         self.clients = clients
@@ -60,7 +66,8 @@ class DownloadService:
         except Exception:
             logger.exception(
                 "Failed to fetch metadata for %s/%s; using placeholder",
-                source, source_album_id,
+                source,
+                source_album_id,
             )
             return fallback
 
@@ -70,9 +77,7 @@ class DownloadService:
         title = getattr(album, "title", None) or fallback["title"]
         artist_obj = getattr(album, "artist", None)
         artist = (
-            getattr(artist_obj, "name", None)
-            if artist_obj is not None
-            else None
+            getattr(artist_obj, "name", None) if artist_obj is not None else None
         ) or fallback["artist"]
 
         # Cover URL — Tidal exposes a bare cover ID, Qobuz a full URL.
@@ -89,20 +94,21 @@ class DownloadService:
             if isinstance(image, dict):
                 cover_url = image.get("large") or image.get("small")
             elif image is not None:
-                cover_url = (
-                    getattr(image, "large", None) or getattr(image, "small", None)
+                cover_url = getattr(image, "large", None) or getattr(
+                    image, "small", None
                 )
             if cover_url is None:
-                cover_url = getattr(album, "cover_url", None) or getattr(album, "cover", None)
+                cover_url = getattr(album, "cover_url", None) or getattr(
+                    album, "cover", None
+                )
 
         track_count = (
             getattr(album, "tracks_count", None)
             or getattr(album, "number_of_tracks", None)
             or len(tracks)
         )
-        release_date = (
-            getattr(album, "release_date_original", None)
-            or getattr(album, "release_date", None)
+        release_date = getattr(album, "release_date_original", None) or getattr(
+            album, "release_date", None
         )
 
         return {
@@ -113,7 +119,9 @@ class DownloadService:
             "release_date": release_date,
         }
 
-    async def enqueue(self, source: str, album_ids: list[str], force: bool = False) -> list[dict]:
+    async def enqueue(
+        self, source: str, album_ids: list[str], force: bool = False
+    ) -> list[dict]:
         items = []
         for source_album_id in album_ids:
             album = self.db.get_album_by_source_id(source, source_album_id)
@@ -134,11 +142,15 @@ class DownloadService:
                 )
                 album = self.db.get_album(album_id)
                 if album is None:
-                    logger.warning("Failed to create album entry for %s", source_album_id)
+                    logger.warning(
+                        "Failed to create album entry for %s", source_album_id
+                    )
                     continue
                 logger.info(
                     "Auto-created album entry for %s: %s — %s",
-                    source_album_id, meta["artist"], meta["title"],
+                    source_album_id,
+                    meta["artist"],
+                    meta["title"],
                 )
             item = {
                 "id": str(uuid.uuid4()),
@@ -171,12 +183,19 @@ class DownloadService:
         for item_id in item_ids:
             self._cancel_requested.add(item_id)
             for item in self._queue:
-                if item["id"] == item_id and item["status"] in ("pending", "downloading"):
+                if item["id"] == item_id and item["status"] in (
+                    "pending",
+                    "downloading",
+                ):
                     item["status"] = "cancelled"
                     self.db.update_album_status(item["album_db_id"], "not_downloaded")
 
     async def cancel_all(self):
-        ids = [item["id"] for item in self._queue if item["status"] in ("pending", "downloading")]
+        ids = [
+            item["id"]
+            for item in self._queue
+            if item["status"] in ("pending", "downloading")
+        ]
         await self.cancel(ids)
 
     async def _process_queue(self):
@@ -192,10 +211,15 @@ class DownloadService:
 
             item["status"] = "downloading"
             self.db.update_album_status(item["album_db_id"], "downloading")
-            await self.event_bus.publish("download_progress", {
-                "item_id": item["id"], "status": "downloading",
-                "tracks_done": 0, "track_count": item["track_count"],
-            })
+            await self.event_bus.publish(
+                "download_progress",
+                {
+                    "item_id": item["id"],
+                    "status": "downloading",
+                    "tracks_done": 0,
+                    "track_count": item["track_count"],
+                },
+            )
 
             try:
                 await self._download_album(item)
@@ -209,16 +233,31 @@ class DownloadService:
                     self._cancel_requested.discard(item["id"])
                     item["status"] = "cancelled"
                     self.db.update_album_status(item["album_db_id"], "not_downloaded")
-                    logger.info("Download of %s cancelled after completion", item["title"])
+                    logger.info(
+                        "Download of %s cancelled after completion", item["title"]
+                    )
                 else:
                     item["status"] = "complete"
-                    self.db.update_album_status(item["album_db_id"], "complete", downloaded_at=datetime.now().isoformat())
-                    await self.event_bus.publish("download_complete", {"item_id": item["id"], "title": item["title"], "artist": item["artist"]})
+                    self.db.update_album_status(
+                        item["album_db_id"],
+                        "complete",
+                        downloaded_at=datetime.now().isoformat(),
+                    )
+                    await self.event_bus.publish(
+                        "download_complete",
+                        {
+                            "item_id": item["id"],
+                            "title": item["title"],
+                            "artist": item["artist"],
+                        },
+                    )
             except Exception as e:
                 logger.exception("Download failed for %s", item["title"])
                 item["status"] = "failed"
                 self.db.update_album_status(item["album_db_id"], "not_downloaded")
-                await self.event_bus.publish("download_failed", {"item_id": item["id"], "error": str(e)})
+                await self.event_bus.publish(
+                    "download_failed", {"item_id": item["id"], "error": str(e)}
+                )
 
     def _build_dl_config_kwargs(
         self,
@@ -241,10 +280,16 @@ class DownloadService:
                 or os.environ.get("STREAMRIP_DOWNLOADS_PATH", "/music")
             ),
             "quality": quality,
-            "folder_format": self.db.get_config("folder_format") or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
-            "track_format": self.db.get_config("track_format") or "{tracknumber:02d}. {artist} - {title}",
-            "max_connections": int(self.db.get_config("max_connections") or self.max_connections),
-            "embed_cover": _parse_bool(self.db.get_config("embed_artwork"), default=True),
+            "folder_format": self.db.get_config("folder_format")
+            or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
+            "track_format": self.db.get_config("track_format")
+            or "{tracknumber:02d}. {artist} - {title}",
+            "max_connections": int(
+                self.db.get_config("max_connections") or self.max_connections
+            ),
+            "embed_cover": _parse_bool(
+                self.db.get_config("embed_artwork"), default=True
+            ),
             "cover_size": self.db.get_config("artwork_size") or "large",
             "source_subdirectories": _parse_bool(
                 self.db.get_config("source_subdirectories"), default=False
@@ -292,10 +337,15 @@ class DownloadService:
         # Qobuz keeps the legacy name to preserve existing dedup state on disk.
         downloads_db = None
         if not item.get("force"):
-            db_dir = os.path.dirname(
-                os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
-            ) or "data"
-            db_filename = "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
+            db_dir = (
+                os.path.dirname(
+                    os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
+                )
+                or "data"
+            )
+            db_filename = (
+                "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
+            )
             downloads_db = os.path.join(db_dir, db_filename)
 
         config_kwargs = self._build_dl_config_kwargs(
@@ -319,8 +369,7 @@ class DownloadService:
 
         def _render_statuses() -> list[dict]:
             return [
-                dict(track_statuses_by_num[k])
-                for k in sorted(track_statuses_by_num)
+                dict(track_statuses_by_num[k]) for k in sorted(track_statuses_by_num)
             ]
 
         def _emit_progress():
@@ -330,17 +379,22 @@ class DownloadService:
                     # Fire-and-forget — progress events are best-effort; if
                     # publish fails the next callback will retry.  Discarding
                     # the task ref here is intentional.
-                    loop.create_task(event_bus.publish("download_progress", {  # noqa: RUF006
-                        "item_id": queue_item["id"],
-                        "status": "downloading",
-                        "tracks_done": queue_item.get("tracks_done", 0),
-                        "track_count": queue_item.get("track_count", 0),
-                        "bytes_done": queue_item.get("bytes_done", 0),
-                        "bytes_total": queue_item.get("bytes_total", 0),
-                        "speed": queue_item.get("speed", 0),
-                        "current_track": queue_item.get("current_track", ""),
-                        "track_statuses": _render_statuses(),
-                    }))
+                    loop.create_task(  # noqa: RUF006
+                        event_bus.publish(
+                            "download_progress",
+                            {
+                                "item_id": queue_item["id"],
+                                "status": "downloading",
+                                "tracks_done": queue_item.get("tracks_done", 0),
+                                "track_count": queue_item.get("track_count", 0),
+                                "bytes_done": queue_item.get("bytes_done", 0),
+                                "bytes_total": queue_item.get("bytes_total", 0),
+                                "speed": queue_item.get("speed", 0),
+                                "current_track": queue_item.get("current_track", ""),
+                                "track_statuses": _render_statuses(),
+                            },
+                        )
+                    )
             except Exception:
                 pass
 
@@ -386,8 +440,12 @@ class DownloadService:
                 queue_item["tracks_done"] = queue_item.get("tracks_done", 0) + 1
             _emit_progress()
 
-        logger.info("Downloading album: %s - %s (id: %s)",
-                     item["artist"], item["title"], item["source_album_id"])
+        logger.info(
+            "Downloading album: %s - %s (id: %s)",
+            item["artist"],
+            item["title"],
+            item["source_album_id"],
+        )
 
         downloader = AlbumDownloader(
             sdk_client,
@@ -424,8 +482,13 @@ class DownloadService:
                 f"({result.success_rate:.0%}), below 80% threshold"
             )
 
-        logger.info("Download complete: %s - %s (%d/%d tracks)",
-                     item["artist"], item["title"], result.successful, result.total)
+        logger.info(
+            "Download complete: %s - %s (%d/%d tracks)",
+            item["artist"],
+            item["title"],
+            result.successful,
+            result.total,
+        )
 
     def _update_track_statuses_from_result(self, item: dict, result):
         """Update track download_status in the web DB from AlbumResult."""

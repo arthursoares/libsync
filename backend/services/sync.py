@@ -33,7 +33,12 @@ class SyncService:
         # sufficient. If the session is actually down, the SDK call below
         # will surface a proper error.
         if client is None:
-            return {"new_albums": [], "removed_albums": [], "source": source, "last_sync": None}
+            return {
+                "new_albums": [],
+                "removed_albums": [],
+                "source": source,
+                "last_sync": None,
+            }
 
         all_items = await self.library_service.fetch_all_favorites(source, client)
 
@@ -53,7 +58,9 @@ class SyncService:
 
         # Find removed: albums in DB but not in streaming library
         local_albums = self.db.get_albums(source, limit=10000)
-        removed_albums = [a for a in local_albums if a["source_album_id"] not in streaming_ids]
+        removed_albums = [
+            a for a in local_albums if a["source_album_id"] not in streaming_ids
+        ]
 
         # Get last sync time
         history = self.db.get_sync_history(source, limit=1)
@@ -78,7 +85,9 @@ class SyncService:
         """
         run_id = self.db.create_sync_run(source)
 
-        await self.event_bus.publish("sync_started", {"source": source, "run_id": run_id})
+        await self.event_bus.publish(
+            "sync_started", {"source": source, "run_id": run_id}
+        )
 
         try:
             # Refresh library from streaming API.  refresh_library returns
@@ -92,7 +101,8 @@ class SyncService:
             if download_new and self.download_service is not None and new_ids:
                 logger.info(
                     "Auto-sync enqueueing %d new %s albums for download",
-                    len(new_ids), source,
+                    len(new_ids),
+                    source,
                 )
                 try:
                     await self.download_service.enqueue(source, new_ids)
@@ -108,12 +118,15 @@ class SyncService:
                 albums_downloaded=albums_downloaded,
             )
 
-            await self.event_bus.publish("sync_complete", {
-                "source": source,
-                "run_id": run_id,
-                "new_count": refresh_result["new"],
-                "downloaded_count": albums_downloaded,
-            })
+            await self.event_bus.publish(
+                "sync_complete",
+                {
+                    "source": source,
+                    "run_id": run_id,
+                    "new_count": refresh_result["new"],
+                    "downloaded_count": albums_downloaded,
+                },
+            )
 
             return {
                 "run_id": run_id,
@@ -152,7 +165,8 @@ class SyncService:
                 try:
                     logger.info(
                         "Auto-sync running for %s (download_new=%s)",
-                        source, download_new,
+                        source,
+                        download_new,
                     )
                     await self.run_sync(source, download_new=download_new)
                 except Exception:

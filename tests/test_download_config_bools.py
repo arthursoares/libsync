@@ -10,6 +10,7 @@ which silently inverted the user's intent for several knobs:
   - ``disc_subdirectories = False`` → stayed True
   - ``qobuz_download_booklets = False`` → stayed True
 """
+
 import os
 import tempfile
 

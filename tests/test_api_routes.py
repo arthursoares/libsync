@@ -1,4 +1,5 @@
 """Tests for API routes."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,7 +15,9 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
         yield c
 
 
@@ -50,7 +53,9 @@ class TestDownloadRoutes:
 
     async def test_enqueue_download(self, client, app):
         app.state.db.upsert_album("qobuz", "a1", "Test", "Artist")
-        resp = await client.post("/api/downloads/queue", json={"source": "qobuz", "album_ids": ["a1"]})
+        resp = await client.post(
+            "/api/downloads/queue", json={"source": "qobuz", "album_ids": ["a1"]}
+        )
         assert resp.status_code == 200
         assert len(resp.json()) == 1
 
@@ -99,9 +104,12 @@ class TestAuthOAuthRoutes:
         assert "qobuz.com" in data["url"]
 
     async def test_oauth_from_url_returns_400_on_exchange_failure(self, client):
-        with patch("qobuz.auth.extract_code_from_url", return_value="code"), patch(
-            "qobuz.auth.exchange_code",
-            new=AsyncMock(side_effect=RuntimeError("bad code")),
+        with (
+            patch("qobuz.auth.extract_code_from_url", return_value="code"),
+            patch(
+                "qobuz.auth.exchange_code",
+                new=AsyncMock(side_effect=RuntimeError("bad code")),
+            ),
         ):
             resp = await client.post(
                 "/api/auth/qobuz/oauth-from-url",

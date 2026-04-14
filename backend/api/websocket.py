@@ -1,4 +1,5 @@
 """WebSocket handler for real-time events."""
+
 import json
 import logging
 

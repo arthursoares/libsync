@@ -5,6 +5,7 @@ At config-update time the loop is skipped because no source is connected.
 Later when the user authenticates, ``_reload_clients`` runs but auto-sync
 must also be re-checked, otherwise scheduled syncs stay off indefinitely.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +48,9 @@ class TestAutoSyncRevaluatedOnHotReload:
         # User enables auto-sync BEFORE connecting any source.  The settings
         # endpoint runs _start_auto_sync_if_enabled but it short-circuits
         # because clients dict is empty ("no source connected; skipping").
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             resp = await client.patch(
                 "/api/config",
                 json={"auto_sync_enabled": True, "auto_sync_interval": "60"},
@@ -72,7 +75,9 @@ class TestAutoSyncRevaluatedOnHotReload:
 
         # Trigger hot-reload via a credential write — this is what every
         # OAuth callback / manual-token path eventually does.
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             resp = await client.patch(
                 "/api/config",
                 json={"qobuz_token": "fake-token-from-oauth"},
@@ -106,7 +111,9 @@ class TestAutoSyncRevaluatedOnHotReload:
         )
 
         # First credential write: clients become available, auto-sync starts.
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             await client.patch(
                 "/api/config",
                 json={"auto_sync_enabled": True, "auto_sync_interval": "60"},
@@ -118,7 +125,9 @@ class TestAutoSyncRevaluatedOnHotReload:
 
         # Second credential write (e.g. token refresh) — auto-sync was
         # already running; the same task object should remain.
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             await client.patch("/api/config", json={"qobuz_token": "tok-2"})
 
         try:

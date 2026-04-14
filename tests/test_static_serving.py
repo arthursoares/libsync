@@ -1,4 +1,5 @@
 """Tests for the SPA static-file catch-all route in backend.main."""
+
 import pytest
 
 from backend.main import create_app
@@ -33,7 +34,9 @@ class TestStaticFileServing:
     async def test_serves_legitimate_bundle_file(self, app_with_static):
         app, _, static_dir = app_with_static
         handler = _get_serve_frontend(app)
-        assert handler is not None, "catch-all route not registered when static dir exists"
+        assert handler is not None, (
+            "catch-all route not registered when static dir exists"
+        )
 
         result = await handler(path="app.js")
         assert result.path == str(static_dir / "app.js")
@@ -45,7 +48,9 @@ class TestStaticFileServing:
         result = await handler(path="some/spa/route")
         assert result.path == str(static_dir / "index.html")
 
-    async def test_traversal_does_not_serve_files_outside_static_dir(self, app_with_static):
+    async def test_traversal_does_not_serve_files_outside_static_dir(
+        self, app_with_static
+    ):
         app, _tmp_path, static_dir = app_with_static
         handler = _get_serve_frontend(app)
         secret_path = static_dir.parent / "secret.txt"
