@@ -6,7 +6,7 @@ Streamrip is a web UI for managing Qobuz and Tidal libraries — downloading, sy
 
 - **Backend**: FastAPI app in `backend/` serving REST API + WebSocket
 - **Frontend**: SvelteKit app in `frontend/` using Arthur Soares Design System
-- **SDKs**: Qobuz and Tidal Python SDKs consumed from the `sdks/qobuz_api_client` git submodule (→ `arthursoares/qobuz_api_client`). Both are installed via `make deps`. Neither depends on anything else in this repo.
+- **SDKs**: Qobuz and Tidal Python SDKs consumed from the `sdks/qobuz_api_client` git submodule (→ `arthursoares/qobuz_tidal_api_client`). Both are installed via `make deps`. Neither depends on anything else in this repo.
 - **Config**: SQLite DB (`backend/models/database.py`) stores credentials, library, and settings directly — there is no streamrip TOML bridge anymore.
 
 ## Key Commands

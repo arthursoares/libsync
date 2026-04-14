@@ -23,7 +23,7 @@ Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accesse
 ## Requirements
 
 - **Docker** (recommended) — everything runs inside the image, you just need a folder to mount for music and a volume for the SQLite data
-- **or** Python 3.10+, Node 20+, `poetry`, `ffmpeg`, and SSH access to [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client) for the SDK submodule
+- **or** Python 3.10+, Node 20+, `poetry`, `ffmpeg`, and access to [`arthursoares/qobuz_tidal_api_client`](https://github.com/arthursoares/qobuz_tidal_api_client) for the SDK submodule
 
 A **premium Qobuz or Tidal subscription** is required for downloads. This project doesn't bypass DRM or account restrictions — it uses your own credentials against the streaming services' own APIs.
 
@@ -93,7 +93,7 @@ Separate targets if you want more control:
 
 ## Architecture (one-paragraph version)
 
-`backend/` is a FastAPI app serving both a REST API and a WebSocket channel. `frontend/` is a SvelteKit app compiled to static HTML/CSS/JS and served by the backend. State lives in a single SQLite database (`backend/models/database.py`) — albums, tracks, config, sync history. Streaming-service access goes through [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client), consumed as a git submodule at `sdks/qobuz_api_client/`, which provides two separate Python packages: `qobuz` and `tidal`. Each exposes an `AlbumDownloader` with progress callbacks that the backend wires to WebSocket events. There is no CLI, no TOML config file, no hidden process — everything the app does is controlled from the Settings page and persisted in the SQLite DB.
+`backend/` is a FastAPI app serving both a REST API and a WebSocket channel. `frontend/` is a SvelteKit app compiled to static HTML/CSS/JS and served by the backend. State lives in a single SQLite database (`backend/models/database.py`) — albums, tracks, config, sync history. Streaming-service access goes through [`arthursoares/qobuz_tidal_api_client`](https://github.com/arthursoares/qobuz_tidal_api_client), consumed as a git submodule at `sdks/qobuz_api_client/`, which provides two separate Python packages: `qobuz` and `tidal`. Each exposes an `AlbumDownloader` with progress callbacks that the backend wires to WebSocket events. There is no CLI, no TOML config file, no hidden process — everything the app does is controlled from the Settings page and persisted in the SQLite DB.
 
 For more detail see [`docs/WEB_UI.md`](docs/WEB_UI.md), [`frontend/README.md`](frontend/README.md), and [`CLAUDE.md`](CLAUDE.md).
 
@@ -124,7 +124,7 @@ Bug reports and PRs are welcome. Please run `make test` and `make lint` before o
 
 ## Acknowledgements
 
-The original [`nathom/streamrip`](https://github.com/nathom/streamrip) — this fork started from there and inherited the Qobuz/Tidal client logic, the tagging helpers, and the MQA decryption primitives. Most of that code now lives in the standalone `qobuz_api_client` SDK, but the design and much of the hard-won protocol knowledge came from upstream. Thanks to nathom, Vitiko98, Sorrow446, DashLt, and the projects that inspired streamrip in the first place:
+The original [`nathom/streamrip`](https://github.com/nathom/streamrip) — this fork started from there and inherited the Qobuz/Tidal client logic, the tagging helpers, and the MQA decryption primitives. Most of that code now lives in the standalone `qobuz_tidal_api_client` SDK, but the design and much of the hard-won protocol knowledge came from upstream. Thanks to nathom, Vitiko98, Sorrow446, DashLt, and the projects that inspired streamrip in the first place:
 
 - [qobuz-dl](https://github.com/vitiko98/qobuz-dl)
 - [Qo-DL Reborn](https://github.com/badumbass/Qo-DL-Reborn)
