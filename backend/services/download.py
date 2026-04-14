@@ -13,6 +13,17 @@ from .event_bus import EventBus
 logger = logging.getLogger("streamrip")
 
 
+def _parse_bool(value: str | None, *, default: bool) -> bool:
+    """Parse a config string into a bool, accepting any casing.
+
+    Pydantic-stringified booleans persist as ``"True"``/``"False"``,
+    so case-sensitive comparisons silently invert user toggles.
+    """
+    if not value:
+        return default
+    return value.strip().lower() in ("true", "1", "yes")
+
+
 class DownloadService:
     def __init__(self, db: AppDatabase, event_bus: EventBus, clients: dict,
                  download_path: str, max_connections: int = 6):
@@ -209,6 +220,47 @@ class DownloadService:
                 self.db.update_album_status(item["album_db_id"], "not_downloaded")
                 await self.event_bus.publish("download_failed", {"item_id": item["id"], "error": str(e)})
 
+    def _build_dl_config_kwargs(
+        self,
+        *,
+        source: str,
+        item: dict,
+        quality: int,
+        downloads_db: str | None,
+    ) -> dict:
+        """Build the DownloadConfig kwargs dict from DB config + item state.
+
+        Boolean keys go through ``_parse_bool`` so that values stored as
+        Pydantic-stringified ``"True"``/``"False"`` are honored alongside
+        the legacy lowercase ``"true"``/``"false"``.
+        """
+        kwargs: dict = {
+            "output_dir": (
+                self.db.get_config("downloads_path")
+                or self.download_path
+                or os.environ.get("STREAMRIP_DOWNLOADS_PATH", "/music")
+            ),
+            "quality": quality,
+            "folder_format": self.db.get_config("folder_format") or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
+            "track_format": self.db.get_config("track_format") or "{tracknumber:02d}. {artist} - {title}",
+            "max_connections": int(self.db.get_config("max_connections") or self.max_connections),
+            "embed_cover": _parse_bool(self.db.get_config("embed_artwork"), default=True),
+            "cover_size": self.db.get_config("artwork_size") or "large",
+            "source_subdirectories": _parse_bool(
+                self.db.get_config("source_subdirectories"), default=False
+            ),
+            "disc_subdirectories": _parse_bool(
+                self.db.get_config("disc_subdirectories"), default=True
+            ),
+            "skip_downloaded": not item.get("force", False),
+            "downloads_db_path": downloads_db,
+        }
+        if source == "qobuz":
+            kwargs["download_booklets"] = _parse_bool(
+                self.db.get_config("qobuz_download_booklets"), default=True
+            )
+        return kwargs
+
     async def _download_album(self, item: dict):
         """Download an album using the appropriate source SDK.
 
@@ -246,28 +298,9 @@ class DownloadService:
             db_filename = "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
             downloads_db = os.path.join(db_dir, db_filename)
 
-        config_kwargs: dict = {
-            "output_dir": (
-                self.db.get_config("downloads_path")
-                or self.download_path
-                or os.environ.get("STREAMRIP_DOWNLOADS_PATH", "/music")
-            ),
-            "quality": quality,
-            "folder_format": self.db.get_config("folder_format") or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
-            "track_format": self.db.get_config("track_format") or "{tracknumber:02d}. {artist} - {title}",
-            "max_connections": int(self.db.get_config("max_connections") or self.max_connections),
-            "embed_cover": self.db.get_config("embed_artwork") != "false",
-            "cover_size": self.db.get_config("artwork_size") or "large",
-            "source_subdirectories": self.db.get_config("source_subdirectories") in ("true", "1"),
-            "disc_subdirectories": self.db.get_config("disc_subdirectories") != "false",
-            "skip_downloaded": not item.get("force", False),
-            "downloads_db_path": downloads_db,
-        }
-        # Qobuz-only settings — the Tidal SDK's DownloadConfig doesn't model them.
-        if source == "qobuz":
-            config_kwargs["download_booklets"] = (
-                self.db.get_config("qobuz_download_booklets") != "false"
-            )
+        config_kwargs = self._build_dl_config_kwargs(
+            source=source, item=item, quality=quality, downloads_db=downloads_db
+        )
 
         dl_config = DownloadConfig(**config_kwargs)
 
