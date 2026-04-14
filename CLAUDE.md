@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-Streamrip is a web UI for managing Qobuz and Tidal libraries — downloading, syncing, and organizing music from both services. The repo now contains only the web UI; the old streamrip CLI (`rip`, TUI, media pipeline) was removed. It consists of:
+Libsync is a self-hosted web UI for managing Qobuz and Tidal libraries — downloading, syncing, and organizing music from both services. The project was renamed from `streamrip` in v0.0.x but is currently rebrand-only — the Python module, the `STREAMRIP_DB_PATH` env var, the SQLite filename `streamrip.db`, the `.streamrip.json` per-album sentinel, the Docker volume name, and the `logging.getLogger("streamrip")` logger all retain the legacy name to avoid breaking existing deployments. Full internal rename is queued for v1.0. The repo originally forked from `nathom/streamrip` and was rebuilt around a web UI; the old CLI (`rip`, TUI, media pipeline) was removed entirely. It consists of:
 
 - **Backend**: FastAPI app in `backend/` serving REST API + WebSocket
 - **Frontend**: SvelteKit app in `frontend/` using Arthur Soares Design System
-- **SDKs**: Qobuz and Tidal Python SDKs consumed from the `sdks/qobuz_api_client` git submodule (→ `arthursoares/qobuz_api_client`). Both are installed via `make deps`. Neither depends on anything else in this repo.
+- **SDKs**: Qobuz and Tidal Python SDKs consumed from the `sdks/qobuz_api_client` git submodule (→ `arthursoares/qobuz_tidal_api_client`). Both are installed via `make deps`. Neither depends on anything else in this repo.
 - **Config**: SQLite DB (`backend/models/database.py`) stores credentials, library, and settings directly — there is no streamrip TOML bridge anymore.
 
 ## Key Commands

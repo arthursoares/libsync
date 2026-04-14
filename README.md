@@ -1,10 +1,10 @@
-# streamrip
+# Libsync
 
 A self-hosted web UI for managing and downloading your Qobuz and Tidal music libraries.
 
 Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accessed through any browser. It syncs your streaming-service favorites into a local database, lets you search and trigger downloads with live progress, and organizes the files on disk with your preferred folder/track templates. Both Qobuz and Tidal go through standalone async Python SDKs (consumed as a git submodule) — no CLI, no TOML config, no hidden state.
 
-> This repo started as a fork of [nathom/streamrip](https://github.com/nathom/streamrip) and has since been rebuilt around a web UI. The original `rip` CLI, the TUI, and the Deezer/SoundCloud source clients are no longer part of this project. See [Acknowledgements](#acknowledgements) for credit to the upstream.
+> Libsync started life as a fork of [nathom/streamrip](https://github.com/nathom/streamrip) and was rebuilt around a web UI. The original `rip` CLI, the TUI, and the Deezer/SoundCloud source clients are no longer part of this project. See [Acknowledgements](#acknowledgements) for credit to the upstream. Some internals (env var names, the on-disk SQLite filename, the `.streamrip.json` sentinel) still carry the old name to preserve compatibility with existing deployments — those will rename in a future major release.
 
 ## Features
 
@@ -23,7 +23,7 @@ Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accesse
 ## Requirements
 
 - **Docker** (recommended) — everything runs inside the image, you just need a folder to mount for music and a volume for the SQLite data
-- **or** Python 3.10+, Node 20+, `poetry`, `ffmpeg`, and SSH access to [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client) for the SDK submodule
+- **or** Python 3.10+, Node 20+, `poetry`, `ffmpeg`, and access to [`arthursoares/qobuz_tidal_api_client`](https://github.com/arthursoares/qobuz_tidal_api_client) for the SDK submodule
 
 A **premium Qobuz or Tidal subscription** is required for downloads. This project doesn't bypass DRM or account restrictions — it uses your own credentials against the streaming services' own APIs.
 
@@ -31,18 +31,20 @@ A **premium Qobuz or Tidal subscription** is required for downloads. This projec
 
 ```bash
 # clone with submodules so the Qobuz + Tidal SDKs come along
-git clone --recursive git@github.com:arthursoares/streamrip.git
-cd streamrip
+git clone --recursive git@github.com:arthursoares/libsync.git
+cd libsync
 
 # build
-docker build -f docker/Dockerfile -t streamrip .
+docker build -f docker/Dockerfile -t libsync .
 
 # run — mount your music folder and a data volume for the SQLite DB
+# (env var and volume names retain the legacy `streamrip` prefix for
+# now to keep existing installations working — see top-of-README note)
 docker run -p 8080:8080 \
   -v ~/Music:/music \
   -v streamrip-data:/data \
   -e STREAMRIP_DB_PATH=/data/streamrip.db \
-  streamrip
+  libsync
 ```
 
 Open http://localhost:8080 and follow the first-time setup below.
@@ -56,8 +58,8 @@ git submodule update --init --recursive
 ## Quick start — local dev
 
 ```bash
-git clone --recursive git@github.com:arthursoares/streamrip.git
-cd streamrip
+git clone --recursive git@github.com:arthursoares/libsync.git
+cd libsync
 
 # install backend deps + both SDKs from the submodule
 make deps
@@ -93,14 +95,14 @@ Separate targets if you want more control:
 
 ## Architecture (one-paragraph version)
 
-`backend/` is a FastAPI app serving both a REST API and a WebSocket channel. `frontend/` is a SvelteKit app compiled to static HTML/CSS/JS and served by the backend. State lives in a single SQLite database (`backend/models/database.py`) — albums, tracks, config, sync history. Streaming-service access goes through [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client), consumed as a git submodule at `sdks/qobuz_api_client/`, which provides two separate Python packages: `qobuz` and `tidal`. Each exposes an `AlbumDownloader` with progress callbacks that the backend wires to WebSocket events. There is no CLI, no TOML config file, no hidden process — everything the app does is controlled from the Settings page and persisted in the SQLite DB.
+`backend/` is a FastAPI app serving both a REST API and a WebSocket channel. `frontend/` is a SvelteKit app compiled to static HTML/CSS/JS and served by the backend. State lives in a single SQLite database (`backend/models/database.py`) — albums, tracks, config, sync history. Streaming-service access goes through [`arthursoares/qobuz_tidal_api_client`](https://github.com/arthursoares/qobuz_tidal_api_client), consumed as a git submodule at `sdks/qobuz_api_client/`, which provides two separate Python packages: `qobuz` and `tidal`. Each exposes an `AlbumDownloader` with progress callbacks that the backend wires to WebSocket events. There is no CLI, no TOML config file, no hidden process — everything the app does is controlled from the Settings page and persisted in the SQLite DB.
 
 For more detail see [`docs/WEB_UI.md`](docs/WEB_UI.md), [`frontend/README.md`](frontend/README.md), and [`CLAUDE.md`](CLAUDE.md).
 
 ## Repo layout
 
 ```
-streamrip/
+libsync/
 ├── backend/           FastAPI app (REST + WebSocket)
 │   ├── api/           Route modules (library, downloads, sync, auth, config, websocket)
 │   ├── services/      Library, download, sync services wiring the SDKs to the DB
@@ -124,7 +126,7 @@ Bug reports and PRs are welcome. Please run `make test` and `make lint` before o
 
 ## Acknowledgements
 
-The original [`nathom/streamrip`](https://github.com/nathom/streamrip) — this fork started from there and inherited the Qobuz/Tidal client logic, the tagging helpers, and the MQA decryption primitives. Most of that code now lives in the standalone `qobuz_api_client` SDK, but the design and much of the hard-won protocol knowledge came from upstream. Thanks to nathom, Vitiko98, Sorrow446, DashLt, and the projects that inspired streamrip in the first place:
+The original [`nathom/streamrip`](https://github.com/nathom/streamrip) — this fork started from there and inherited the Qobuz/Tidal client logic, the tagging helpers, and the MQA decryption primitives. Most of that code now lives in the standalone `qobuz_tidal_api_client` SDK, but the design and much of the hard-won protocol knowledge came from upstream. Thanks to nathom, Vitiko98, Sorrow446, DashLt, and the projects that inspired streamrip in the first place:
 
 - [qobuz-dl](https://github.com/vitiko98/qobuz-dl)
 - [Qo-DL Reborn](https://github.com/badumbass/Qo-DL-Reborn)
