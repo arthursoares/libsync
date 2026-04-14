@@ -170,9 +170,19 @@ class AppDatabase:
                      )
                 """,
                 (
-                    source, source_album_id, title, artist, release_date,
-                    label, genre, track_count, duration_seconds, cover_url,
-                    quality, added_to_library_at, user_id,
+                    source,
+                    source_album_id,
+                    title,
+                    artist,
+                    release_date,
+                    label,
+                    genre,
+                    track_count,
+                    duration_seconds,
+                    cover_url,
+                    quality,
+                    added_to_library_at,
+                    user_id,
                 ),
             )
             row = conn.execute(
@@ -204,7 +214,11 @@ class AppDatabase:
             params.extend([f"%{search}%", f"%{search}%"])
 
         allowed_sorts = {
-            "added_to_library_at", "title", "artist", "release_date", "downloaded_at"
+            "added_to_library_at",
+            "title",
+            "artist",
+            "release_date",
+            "downloaded_at",
         }
         if sort_by not in allowed_sorts:
             sort_by = "added_to_library_at"
@@ -228,10 +242,14 @@ class AppDatabase:
 
     def get_album(self, album_id: int) -> dict | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM albums WHERE id = ?", (album_id,)
+            ).fetchone()
             return dict(row) if row else None
 
-    def get_album_by_source_id(self, source: str, source_album_id: str, user_id: int = 1) -> dict | None:
+    def get_album_by_source_id(
+        self, source: str, source_album_id: str, user_id: int = 1
+    ) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM albums WHERE source=? AND source_album_id=? AND user_id=?",
@@ -252,7 +270,9 @@ class AppDatabase:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_album_status(self, album_id: int, status: str, downloaded_at: str | None = None):
+    def update_album_status(
+        self, album_id: int, status: str, downloaded_at: str | None = None
+    ):
         with self._connect() as conn:
             if downloaded_at:
                 conn.execute(
@@ -265,7 +285,13 @@ class AppDatabase:
                     (status, album_id),
                 )
 
-    def count_albums(self, source: str, user_id: int = 1, status: str | None = None, search: str | None = None) -> int:
+    def count_albums(
+        self,
+        source: str,
+        user_id: int = 1,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> int:
         conditions = ["source = ?", "user_id = ?"]
         params: list = [source, user_id]
         if status:
@@ -276,7 +302,9 @@ class AppDatabase:
             params.extend([f"%{search}%", f"%{search}%"])
         where = " AND ".join(conditions)
         with self._connect() as conn:
-            row = conn.execute(f"SELECT COUNT(*) as cnt FROM albums WHERE {where}", params).fetchone()
+            row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM albums WHERE {where}", params
+            ).fetchone()
             return row["cnt"]
 
     # ── Tracks ──
@@ -307,8 +335,17 @@ class AppDatabase:
                      duration_seconds=excluded.duration_seconds,
                      explicit=excluded.explicit, isrc=excluded.isrc
                 """,
-                (album_id, source_track_id, title, artist, track_number,
-                 disc_number, duration_seconds, explicit, isrc),
+                (
+                    album_id,
+                    source_track_id,
+                    title,
+                    artist,
+                    track_number,
+                    disc_number,
+                    duration_seconds,
+                    explicit,
+                    isrc,
+                ),
             )
             row = conn.execute(
                 "SELECT id FROM tracks WHERE album_id=? AND source_track_id=?",
@@ -324,9 +361,15 @@ class AppDatabase:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_track_status(self, track_id: int, status: str, file_path: str | None = None,
-                            format: str | None = None, bit_depth: int | None = None,
-                            sample_rate: int | None = None):
+    def update_track_status(
+        self,
+        track_id: int,
+        status: str,
+        file_path: str | None = None,
+        format: str | None = None,
+        bit_depth: int | None = None,
+        sample_rate: int | None = None,
+    ):
         with self._connect() as conn:
             conn.execute(
                 """UPDATE tracks SET download_status=?, file_path=?,
@@ -345,16 +388,28 @@ class AppDatabase:
             )
             return cursor.lastrowid
 
-    def complete_sync_run(self, run_id: int, albums_found: int, albums_new: int,
-                          albums_removed: int, albums_downloaded: int):
+    def complete_sync_run(
+        self,
+        run_id: int,
+        albums_found: int,
+        albums_new: int,
+        albums_removed: int,
+        albums_downloaded: int,
+    ):
         with self._connect() as conn:
             conn.execute(
                 """UPDATE sync_runs SET completed_at=?, albums_found=?,
                    albums_new=?, albums_removed=?, albums_downloaded=?,
                    status='complete'
                    WHERE id=?""",
-                (datetime.now().isoformat(), albums_found, albums_new,
-                 albums_removed, albums_downloaded, run_id),
+                (
+                    datetime.now().isoformat(),
+                    albums_found,
+                    albums_new,
+                    albums_removed,
+                    albums_downloaded,
+                    run_id,
+                ),
             )
 
     def fail_sync_run(self, run_id: int):
@@ -377,7 +432,9 @@ class AppDatabase:
 
     def get_config(self, key: str) -> str | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM config WHERE key=?", (key,)
+            ).fetchone()
             return row["value"] if row else None
 
     def set_config(self, key: str, value: str):

@@ -1,4 +1,5 @@
 """Pydantic models for API request/response."""
+
 from pydantic import BaseModel
 
 
@@ -124,7 +125,9 @@ class AppConfig(BaseModel):
     max_connections: int = 6
     source_subdirectories: bool = False
     disc_subdirectories: bool = True
-    folder_format: str = "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
+    folder_format: str = (
+        "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
+    )
     track_format: str = "{tracknumber:02}. {artist} - {title}{explicit}"
     embed_artwork: bool = True
     artwork_size: str = "large"

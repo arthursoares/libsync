@@ -46,9 +46,15 @@ log_cli = true
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.ruff]
+extend-exclude = ["sdks/"]
+
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "ASYNC", "N", "RUF", "ERA001"]
-ignore = []
+# ASYNC240 flags os.path usage inside async functions, recommending
+# trio.Path / anyio.Path.  We use asyncio + tiny filesystem lookups
+# (existence checks, realpath) that don't materially block the loop.
+ignore = ["ASYNC240"]
 fixable = ["ALL"]
 unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"

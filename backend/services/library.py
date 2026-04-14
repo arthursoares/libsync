@@ -14,9 +14,26 @@ class LibraryService:
         self.event_bus = event_bus
         self.clients = clients
 
-    async def get_albums(self, source, page=1, page_size=50, sort_by="added_to_library_at", sort_dir="DESC", status=None, search=None):
+    async def get_albums(
+        self,
+        source,
+        page=1,
+        page_size=50,
+        sort_by="added_to_library_at",
+        sort_dir="DESC",
+        status=None,
+        search=None,
+    ):
         offset = (page - 1) * page_size
-        albums = self.db.get_albums(source=source, status=status, search=search, sort_by=sort_by, sort_dir=sort_dir, limit=page_size, offset=offset)
+        albums = self.db.get_albums(
+            source=source,
+            status=status,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            limit=page_size,
+            offset=offset,
+        )
         total = self.db.count_albums(source, status=status, search=search)
         return {"albums": albums, "total": total, "page": page, "page_size": page_size}
 
@@ -30,7 +47,7 @@ class LibraryService:
         if not tracks:
             source = album["source"]
             client = self.clients.get(source)
-            if client is not None and hasattr(client, 'catalog'):
+            if client is not None and hasattr(client, "catalog"):
                 try:
                     tracks = await self._fetch_and_cache_tracks(
                         client, source, album["source_album_id"], album_id
@@ -43,8 +60,10 @@ class LibraryService:
     async def _fetch_and_cache_tracks(self, client, source, source_album_id, album_id):
         """Fetch track list from API and cache in DB."""
         if source == "qobuz":
-            if hasattr(client, 'catalog'):
-                return await self._fetch_qobuz_tracks_sdk(client, source_album_id, album_id)
+            if hasattr(client, "catalog"):
+                return await self._fetch_qobuz_tracks_sdk(
+                    client, source_album_id, album_id
+                )
             return await self._fetch_qobuz_tracks(client, source_album_id, album_id)
         elif source == "tidal":
             return await self._fetch_tidal_tracks(client, source_album_id, album_id)
@@ -53,7 +72,7 @@ class LibraryService:
     async def _fetch_qobuz_tracks_sdk(self, client, source_album_id, album_id):
         """Fetch tracks from Qobuz using SDK client."""
         try:
-            album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
+            _album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
         except Exception:
             logger.exception("Failed to fetch Qobuz album %s via SDK", source_album_id)
             return []
@@ -84,7 +103,11 @@ class LibraryService:
         track_items = resp.get("tracks", {}).get("items", [])
         for t in track_items:
             artist = t.get("performer", {})
-            artist_name = artist.get("name", "Unknown") if isinstance(artist, dict) else (str(artist) if artist else "Unknown")
+            artist_name = (
+                artist.get("name", "Unknown")
+                if isinstance(artist, dict)
+                else (str(artist) if artist else "Unknown")
+            )
 
             self.db.upsert_track(
                 album_id=album_id,
@@ -111,8 +134,10 @@ class LibraryService:
         for t in tracks:
             # Prefer the primary artist's name, fall back to joined artists
             # list for compilations / collaborations.
-            artist_name = t.artist.name if t.artist.name else (
-                ", ".join(a.name for a in t.artists) if t.artists else "Unknown"
+            artist_name = (
+                t.artist.name
+                if t.artist.name
+                else (", ".join(a.name for a in t.artists) if t.artists else "Unknown")
             )
             self.db.upsert_track(
                 album_id=album_id,
@@ -136,7 +161,10 @@ class LibraryService:
         all_items = await self.fetch_all_favorites(source, client)
 
         from datetime import datetime
-        existing_ids = {a["source_album_id"] for a in self.db.get_albums(source, limit=100000)}
+
+        existing_ids = {
+            a["source_album_id"] for a in self.db.get_albums(source, limit=100000)
+        }
         now = datetime.now().isoformat()
         new_count = 0
         new_album_ids: list[str] = []
@@ -151,8 +179,15 @@ class LibraryService:
                 album_resp["added_to_library_at"] = now
             self.db.upsert_album(**album_resp)
 
-        await self.event_bus.publish("library_updated", {"source": source, "new_count": new_count, "total": len(all_items)})
-        return {"total": len(all_items), "new": new_count, "new_album_ids": new_album_ids}
+        await self.event_bus.publish(
+            "library_updated",
+            {"source": source, "new_count": new_count, "total": len(all_items)},
+        )
+        return {
+            "total": len(all_items),
+            "new": new_count,
+            "new_album_ids": new_album_ids,
+        }
 
     async def fetch_all_favorites(self, source: str, client) -> list[dict]:
         """Fetch every favorite album for *source* as a list of raw dicts.
@@ -242,17 +277,19 @@ class LibraryService:
         result = await client.playlists.list(limit=limit)
         playlists = []
         for item in result.items:
-            playlists.append({
-                "id": item.get("id"),
-                "name": item.get("name", "Untitled"),
-                "description": item.get("description") or "",
-                "tracks_count": item.get("tracks_count", 0),
-                "duration": item.get("duration", 0),
-                "is_public": item.get("is_public", False),
-                "created_at": item.get("created_at"),
-                "updated_at": item.get("updated_at"),
-                "owner": (item.get("owner") or {}).get("name", ""),
-            })
+            playlists.append(
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name", "Untitled"),
+                    "description": item.get("description") or "",
+                    "tracks_count": item.get("tracks_count", 0),
+                    "duration": item.get("duration", 0),
+                    "is_public": item.get("is_public", False),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "owner": (item.get("owner") or {}).get("name", ""),
+                }
+            )
         return playlists
 
     async def get_playlist(
@@ -263,9 +300,7 @@ class LibraryService:
         if client is None or source != "qobuz" or not hasattr(client, "playlists"):
             return None
 
-        playlist = await client.playlists.get(
-            playlist_id, extra="tracks", limit=limit
-        )
+        playlist = await client.playlists.get(playlist_id, extra="tracks", limit=limit)
         # Tracks are raw dicts on Playlist.tracks (one per item)
         tracks = []
         for raw in playlist.tracks:
@@ -274,19 +309,23 @@ class LibraryService:
                 continue
             artist = track_obj.get("performer") or track_obj.get("composer") or {}
             album = track_obj.get("album", {})
-            tracks.append({
-                "id": track_obj.get("id"),
-                "title": track_obj.get("title"),
-                "artist": (
-                    artist.get("name")
-                    if isinstance(artist, dict)
-                    else str(artist)
-                ),
-                "duration_seconds": track_obj.get("duration"),
-                "album_title": album.get("title") if isinstance(album, dict) else None,
-                "album_id": str(album.get("id")) if isinstance(album, dict) and album.get("id") else None,
-                "track_number": track_obj.get("track_number"),
-            })
+            tracks.append(
+                {
+                    "id": track_obj.get("id"),
+                    "title": track_obj.get("title"),
+                    "artist": (
+                        artist.get("name") if isinstance(artist, dict) else str(artist)
+                    ),
+                    "duration_seconds": track_obj.get("duration"),
+                    "album_title": album.get("title")
+                    if isinstance(album, dict)
+                    else None,
+                    "album_id": str(album.get("id"))
+                    if isinstance(album, dict) and album.get("id")
+                    else None,
+                    "track_number": track_obj.get("track_number"),
+                }
+            )
 
         return {
             "id": playlist.id,
@@ -318,7 +357,9 @@ class LibraryService:
         # per-source extractor below.
         result = await client.catalog.search_albums(query, limit=limit, offset=offset)
         if source == "qobuz":
-            raw_items = [self._sdk_album_to_dict_from_raw(item) for item in result.items]
+            raw_items = [
+                self._sdk_album_to_dict_from_raw(item) for item in result.items
+            ]
         else:
             raw_items = list(result.items)
 
@@ -328,12 +369,16 @@ class LibraryService:
             if parsed is None:
                 continue
             existing = self.db.get_album_by_source_id(source, parsed["source_album_id"])
-            enriched.append({
-                **parsed,
-                "in_library": existing is not None,
-                "download_status": existing["download_status"] if existing else "not_downloaded",
-                "id": existing["id"] if existing else 0,
-            })
+            enriched.append(
+                {
+                    **parsed,
+                    "in_library": existing is not None,
+                    "download_status": existing["download_status"]
+                    if existing
+                    else "not_downloaded",
+                    "id": existing["id"] if existing else 0,
+                }
+            )
 
         return {
             "albums": enriched,
@@ -361,12 +406,19 @@ class LibraryService:
         sample_rate = album.get("maximum_sampling_rate", 44.1)
         quality = f"FLAC {bit_depth}/{sample_rate}kHz" if bit_depth else None
         return {
-            "source": "qobuz", "source_album_id": str(album["id"]),
+            "source": "qobuz",
+            "source_album_id": str(album["id"]),
             "title": album.get("title", "Unknown"),
-            "artist": artist.get("name", "Unknown") if isinstance(artist, dict) else str(artist),
+            "artist": artist.get("name", "Unknown")
+            if isinstance(artist, dict)
+            else str(artist),
             "release_date": album.get("release_date_original"),
-            "label": album.get("label", {}).get("name") if isinstance(album.get("label"), dict) else None,
-            "genre": album.get("genre", {}).get("name") if isinstance(album.get("genre"), dict) else None,
+            "label": album.get("label", {}).get("name")
+            if isinstance(album.get("label"), dict)
+            else None,
+            "genre": album.get("genre", {}).get("name")
+            if isinstance(album.get("genre"), dict)
+            else None,
             "track_count": album.get("tracks_count"),
             "duration_seconds": album.get("duration"),
             "cover_url": image.get("large") or image.get("small"),
@@ -376,14 +428,25 @@ class LibraryService:
     def _extract_tidal_album(self, item):
         album = item.get("item", item) if "item" in item else item
         artists = album.get("artists", [])
-        artist_name = ", ".join(a["name"] for a in artists) if artists else album.get("artist", {}).get("name", "Unknown")
+        artist_name = (
+            ", ".join(a["name"] for a in artists)
+            if artists
+            else album.get("artist", {}).get("name", "Unknown")
+        )
         cover = album.get("cover", "")
-        cover_url = f"https://resources.tidal.com/images/{cover.replace('-', '/')}/640x640.jpg" if cover else None
+        cover_url = (
+            f"https://resources.tidal.com/images/{cover.replace('-', '/')}/640x640.jpg"
+            if cover
+            else None
+        )
         return {
-            "source": "tidal", "source_album_id": str(album["id"]),
-            "title": album.get("title", "Unknown"), "artist": artist_name,
+            "source": "tidal",
+            "source_album_id": str(album["id"]),
+            "title": album.get("title", "Unknown"),
+            "artist": artist_name,
             "release_date": album.get("releaseDate"),
             "track_count": album.get("numberOfTracks"),
             "duration_seconds": album.get("duration"),
-            "cover_url": cover_url, "quality": album.get("audioQuality"),
+            "cover_url": cover_url,
+            "quality": album.get("audioQuality"),
         }
