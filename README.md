@@ -1,10 +1,10 @@
-# streamrip
+# Libsync
 
 A self-hosted web UI for managing and downloading your Qobuz and Tidal music libraries.
 
 Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accessed through any browser. It syncs your streaming-service favorites into a local database, lets you search and trigger downloads with live progress, and organizes the files on disk with your preferred folder/track templates. Both Qobuz and Tidal go through standalone async Python SDKs (consumed as a git submodule) — no CLI, no TOML config, no hidden state.
 
-> This repo started as a fork of [nathom/streamrip](https://github.com/nathom/streamrip) and has since been rebuilt around a web UI. The original `rip` CLI, the TUI, and the Deezer/SoundCloud source clients are no longer part of this project. See [Acknowledgements](#acknowledgements) for credit to the upstream.
+> Libsync started life as a fork of [nathom/streamrip](https://github.com/nathom/streamrip) and was rebuilt around a web UI. The original `rip` CLI, the TUI, and the Deezer/SoundCloud source clients are no longer part of this project. See [Acknowledgements](#acknowledgements) for credit to the upstream. Some internals (env var names, the on-disk SQLite filename, the `.streamrip.json` sentinel) still carry the old name to preserve compatibility with existing deployments — those will rename in a future major release.
 
 ## Features
 
@@ -31,18 +31,20 @@ A **premium Qobuz or Tidal subscription** is required for downloads. This projec
 
 ```bash
 # clone with submodules so the Qobuz + Tidal SDKs come along
-git clone --recursive git@github.com:arthursoares/streamrip.git
-cd streamrip
+git clone --recursive git@github.com:arthursoares/libsync.git
+cd libsync
 
 # build
-docker build -f docker/Dockerfile -t streamrip .
+docker build -f docker/Dockerfile -t libsync .
 
 # run — mount your music folder and a data volume for the SQLite DB
+# (env var and volume names retain the legacy `streamrip` prefix for
+# now to keep existing installations working — see top-of-README note)
 docker run -p 8080:8080 \
   -v ~/Music:/music \
   -v streamrip-data:/data \
   -e STREAMRIP_DB_PATH=/data/streamrip.db \
-  streamrip
+  libsync
 ```
 
 Open http://localhost:8080 and follow the first-time setup below.
@@ -56,8 +58,8 @@ git submodule update --init --recursive
 ## Quick start — local dev
 
 ```bash
-git clone --recursive git@github.com:arthursoares/streamrip.git
-cd streamrip
+git clone --recursive git@github.com:arthursoares/libsync.git
+cd libsync
 
 # install backend deps + both SDKs from the submodule
 make deps
@@ -100,7 +102,7 @@ For more detail see [`docs/WEB_UI.md`](docs/WEB_UI.md), [`frontend/README.md`](f
 ## Repo layout
 
 ```
-streamrip/
+libsync/
 ├── backend/           FastAPI app (REST + WebSocket)
 │   ├── api/           Route modules (library, downloads, sync, auth, config, websocket)
 │   ├── services/      Library, download, sync services wiring the SDKs to the DB
