@@ -1,6 +1,7 @@
 """Tests for the SPA static-file catch-all route in backend.main."""
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from backend.main import create_app
 
@@ -76,3 +77,26 @@ class TestStaticFileServing:
             "nested path traversal escaped static_dir"
         )
         assert result.path == str(static_dir / "index.html")
+
+
+class TestStaticRouteMethods:
+    """Load balancers and uptime monitors often probe with HEAD — the SPA
+    route must answer HEAD and GET equivalently, not 405."""
+
+    async def test_get_returns_200(self, app_with_static):
+        app, _, _ = app_with_static
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 200
+
+    async def test_head_returns_200_not_405(self, app_with_static):
+        app, _, _ = app_with_static
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.head("/")
+        assert resp.status_code == 200, (
+            f"HEAD / returned {resp.status_code}; health probes will fail"
+        )
