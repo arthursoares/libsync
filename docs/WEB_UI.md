@@ -1,6 +1,6 @@
-# Streamrip Web UI
+# Libsync
 
-Detailed documentation for the streamrip web UI — the app-level README (`../README.md`) is the "getting started" page; this file is the reference.
+Detailed documentation for Libsync — the app-level README (`../README.md`) is the "getting started" page; this file is the reference.
 
 ## Architecture
 
@@ -36,8 +36,8 @@ Detailed documentation for the streamrip web UI — the app-level README (`../RE
 
 Key points:
 - **One process** — FastAPI serves both the static frontend and the API. There is no separate web server, no background worker daemon.
-- **No TOML config** — the streamrip TOML config and `streamrip.config.Config` dataclass are gone. All settings live in the SQLite `config` table and are round-tripped through the Settings page.
-- **SDKs come from a submodule** — `sdks/qobuz_api_client/` is a git submodule pinned to a specific commit of [`arthursoares/qobuz_api_client`](https://github.com/arthursoares/qobuz_api_client). Both `qobuz` and `tidal` Python packages are installed from that subdirectory via `make deps`.
+- **No TOML config** — the original `streamrip` project used a TOML file + `streamrip.config.Config` dataclass; none of that applies here. All Libsync settings live in the SQLite `config` table and are round-tripped through the Settings page.
+- **SDKs come from a submodule** — `sdks/qobuz_api_client/` is a git submodule pinned to a specific commit of [`arthursoares/qobuz_tidal_api_client`](https://github.com/arthursoares/qobuz_tidal_api_client). Both `qobuz` and `tidal` Python packages are installed from that subdirectory via `make deps`. The directory name kept its legacy `qobuz_api_client` path to avoid churning the Dockerfile and Makefile paths at rebrand time.
 - **Both sources use the same facade shape** — every SDK client exposes `client.catalog`, `client.favorites`, `client.streaming`, and can be used with `async with client:`. The backend uses `hasattr(client, 'catalog')` as the "is this an SDK client" check.
 - **Downloads dispatch on source** — `DownloadService._download_album` picks `qobuz.AlbumDownloader` or `tidal.AlbumDownloader` based on `item["source"]` and wires the same progress callbacks either way.
 - **Per-source dedup DBs** — Qobuz uses `data/downloads.db` (legacy name preserved for existing users), Tidal uses `data/downloads-tidal.db`. Track IDs from different services can never collide.
@@ -121,6 +121,8 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 |---|---|---|
 | `STREAMRIP_DB_PATH` | `data/streamrip.db` | Path to the SQLite database |
 | `STREAMRIP_DOWNLOADS_PATH` | `/music` | Fallback download directory if none set in Settings |
+
+The `STREAMRIP_*` env-var prefix and the `streamrip.db` filename are legacy names retained for compatibility with existing deployments of the pre-rebrand project. They will be renamed to a `LIBSYNC_*` prefix in a future major release; until then, treat them as Libsync's configuration surface.
 
 Runtime paths derived from `STREAMRIP_DB_PATH`:
 

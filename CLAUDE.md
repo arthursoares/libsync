@@ -42,9 +42,8 @@ All frontend follows `frontend/src/lib/design-system/tokens.css`:
 - Dark mode default (warm near-black #1a1918)
 - No CSS transitions except 80ms on hover
 
-## Specs and Plans
+## Reference docs
 
-- Design spec: `docs/superpowers/specs/2026-04-06-streamrip-web-ui-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-04-06-streamrip-web-ui-plan.md`
-- Cleanup plan: `~/.claude/plans/linear-tickling-aho.md`
-- Web UI docs: `docs/WEB_UI.md`
+- **`docs/WEB_UI.md`** — deep reference for architecture, env vars, API endpoints, and features. Read this before implementing anything non-trivial; it's more detailed than the README.
+- **`CONTRIBUTING.md`** — Gitflow branch model, commit conventions, PR process.
+- **`SECURITY.md`** — vulnerability reporting + security-relevant context (creds in SQLite, no built-in auth).
