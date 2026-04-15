@@ -1,5 +1,12 @@
 # Libsync
 
+[![Tests](https://github.com/arthursoares/libsync/actions/workflows/pytest.yml/badge.svg?branch=main)](https://github.com/arthursoares/libsync/actions/workflows/pytest.yml)
+[![Ruff](https://github.com/arthursoares/libsync/actions/workflows/ruff.yml/badge.svg?branch=main)](https://github.com/arthursoares/libsync/actions/workflows/ruff.yml)
+[![CodeQL](https://github.com/arthursoares/libsync/actions/workflows/codeql-analysis.yml/badge.svg?branch=main)](https://github.com/arthursoares/libsync/actions/workflows/codeql-analysis.yml)
+[![Latest release](https://img.shields.io/github/v/release/arthursoares/libsync)](https://github.com/arthursoares/libsync/releases/latest)
+[![Container image](https://img.shields.io/badge/ghcr.io-arthursoares%2Flibsync-blue?logo=docker)](https://github.com/arthursoares/libsync/pkgs/container/libsync)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
 A self-hosted web UI for managing and downloading your Qobuz and Tidal music libraries.
 
 Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accessed through any browser. It syncs your streaming-service favorites into a local database, lets you search and trigger downloads with live progress, and organizes the files on disk with your preferred folder/track templates. Both Qobuz and Tidal go through standalone async Python SDKs (consumed as a git submodule) — no CLI, no TOML config, no hidden state.
@@ -122,7 +129,9 @@ libsync/
 
 ## Contributing
 
-Bug reports and PRs are welcome. Please run `make test` and `make lint` before opening a PR. For non-trivial changes, open an issue first so we can agree on the approach.
+Bug reports and PRs welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the Gitflow branch model, local-dev setup, code style, and PR process.
+
+For **security issues**, please don't open a public issue — see **[SECURITY.md](SECURITY.md)** for private reporting channels.
 
 ## Acknowledgements
 
