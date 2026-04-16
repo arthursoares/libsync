@@ -339,7 +339,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     if os.path.exists(static_dir):
         static_root = os.path.realpath(static_dir)
 
-        @app.get("/{path:path}")
+        @app.api_route("/{path:path}", methods=["GET", "HEAD"])
         async def serve_frontend(path: str):
             index = os.path.join(static_root, "index.html")
             requested = os.path.realpath(os.path.join(static_root, path))
