@@ -12,7 +12,10 @@ on:
 # multi-arch docker-publish jobs race on GHA cache writes and one can
 # stall to the 6-hour runner timeout.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Use the PR's head ref when this is a pull_request event, otherwise the
+  # branch ref.  This unifies push + pull_request runs for the same branch
+  # so they don't race on the GHA build cache.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
