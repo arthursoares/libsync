@@ -1,10 +1,13 @@
 """Library API routes."""
+import asyncio
 import os
+import uuid
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..models.schemas import MarkDownloadedRequest
+from ..services import scan as scan_service
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
 
 router = APIRouter(prefix="/api/library", tags=["library"])
@@ -74,6 +77,55 @@ async def unmark_downloaded(request: Request, album_id: int):
         {"album_id": album_id, "status": "not_downloaded"},
     )
     return db.get_album(album_id)
+
+
+@router.post("/scan-fuzzy")
+async def start_scan(request: Request):
+    app = request.app
+    if app.state.active_scan_job is not None:
+        return JSONResponse(
+            {"error": "Another scan is already running"}, status_code=409
+        )
+
+    db = app.state.db
+    download_path = db.get_config("downloads_path") or "/music"
+    sentinel_enabled = (
+        (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
+    )
+
+    job_id = uuid.uuid4().hex
+    app.state.scan_jobs[job_id] = {"status": "running", "result": None}
+    app.state.active_scan_job = job_id
+
+    async def runner():
+        try:
+            result = await scan_service.run_scan(
+                db,
+                download_path=download_path,
+                dedup_db_dir=_dedup_db_dir(),
+                event_bus=app.state.event_bus,
+                sentinel_write_enabled=sentinel_enabled,
+            )
+            app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
+        except Exception as e:
+            app.state.scan_jobs[job_id] = {"status": "error", "result": {"error": str(e)}}
+        finally:
+            app.state.active_scan_job = None
+
+    asyncio.create_task(runner())
+    return {"job_id": job_id}
+
+
+@router.get("/scan-fuzzy/{job_id}")
+async def scan_status(request: Request, job_id: str):
+    job = request.app.state.scan_jobs.get(job_id)
+    if job is None:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    if job["status"] == "running":
+        return {"status": "running"}
+    if job["status"] == "error":
+        return {"status": "error", **(job["result"] or {})}
+    return {"status": "complete", **(job["result"] or {})}
 
 
 @router.get("/search/{source}")

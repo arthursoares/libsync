@@ -302,6 +302,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.download_service = download_service
     app.state.sync_service = sync_service
     app.state._clients_ref = clients
+    app.state.scan_jobs = {}  # job_id → {"status": ..., "result": ...}
+    app.state.active_scan_job = None  # one-at-a-time guard
 
     @app.get("/api/health")
     async def health():
