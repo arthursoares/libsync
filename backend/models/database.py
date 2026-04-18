@@ -8,7 +8,7 @@ from datetime import datetime
 
 logger = logging.getLogger("streamrip")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS albums (
     cover_url TEXT,
     cover_path TEXT,
     quality TEXT,
+    bit_depth INTEGER,
+    sample_rate REAL,
+    local_folder_path TEXT,
     file_size_bytes INTEGER,
     download_status TEXT NOT NULL DEFAULT 'not_downloaded',
     downloaded_at TEXT,
@@ -106,6 +109,50 @@ class AppDatabase:
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (SCHEMA_VERSION,),
                 )
+                return
+
+            current = row["version"]
+            if current < 2:
+                self._migrate_to_v2(conn)
+            conn.execute(
+                "UPDATE schema_version SET version = ?",
+                (SCHEMA_VERSION,),
+            )
+
+    def _migrate_to_v2(self, conn):
+        """Schema v1 → v2: add bit_depth, sample_rate, local_folder_path.
+
+        Backfills bit_depth / sample_rate best-effort by parsing the
+        existing quality string (e.g. "FLAC 24/96kHz"). Rows whose
+        quality doesn't match the pattern keep NULLs — the matcher
+        treats NULL bit_depth as "unknown" (allows matching).
+        """
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(albums)").fetchall()}
+        if "bit_depth" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN bit_depth INTEGER")
+        if "sample_rate" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN sample_rate REAL")
+        if "local_folder_path" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN local_folder_path TEXT")
+
+        import re
+        pattern = re.compile(r"(\d+)\s*/\s*([\d.]+)\s*kHz", re.IGNORECASE)
+        rows = conn.execute(
+            "SELECT id, quality FROM albums WHERE quality IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            m = pattern.search(row["quality"] or "")
+            if not m:
+                continue
+            try:
+                bd = int(m.group(1))
+                sr = float(m.group(2))
+            except ValueError:
+                continue
+            conn.execute(
+                "UPDATE albums SET bit_depth = ?, sample_rate = ? WHERE id = ?",
+                (bd, sr, row["id"]),
+            )
 
     @contextmanager
     def _connect(self):
