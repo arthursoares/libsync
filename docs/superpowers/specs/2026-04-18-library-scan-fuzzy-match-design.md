@@ -163,7 +163,7 @@ Frontend tests (`frontend/tests/`):
 - **Mutagen for many lossy/edge formats.** For `.m4a`, `.opus`, `.ape`, `.dsf`, bit-depth extraction may be flaky. Degrade gracefully: unknown bit_depth → still allow auto-match when the library album also has unknown bit_depth, otherwise push to review.
 - **Scan time on large collections.** 10k albums × tag read = seconds, not minutes. Async-iterate folders and read tags off the event loop via `asyncio.to_thread` if needed. The WebSocket progress events keep the UI honest.
 - **Normalization false positives.** Stripping parentheses can collapse distinct releases ("Greatest Hits" vs "Greatest Hits (Deluxe)"). Mitigation: when normalized keys collide on the library side, all candidates go to review, never auto-match.
-- **Sentinel write permission.** If the mount is read-only (rare but possible), the sentinel write fails silently — the DB still records the match. Log a warning; don't fail the whole operation.
+- **Sentinel write permission.** Read-only mounts (e.g. NFS/SMB shares of an existing library) can't accept the sentinel write. The primitive must catch `OSError` / `PermissionError`, log a warning, and continue — the DB record is the source of truth, the sentinel is an optimization. A config toggle `scan_sentinel_write_enabled` (default `true`) lets users disable the write attempt up front when they know the mount is read-only, to avoid log noise across thousands of folders.
 
 ## Deliverable summary
 
