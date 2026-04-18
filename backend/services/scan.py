@@ -142,3 +142,113 @@ def read_folder_metadata(folder: Path) -> FolderMeta | None:
         track_count=len(audio),
         source=source,
     )
+
+
+from collections import defaultdict
+
+
+@dataclass(frozen=True)
+class Candidate:
+    album_id: int
+    source: str
+    artist: str
+    title: str
+    score: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class MatchResult:
+    """Result of classifying one folder against the library."""
+    kind: str  # "auto_match" | "review" | "unmatched"
+    album_id: int | None = None  # set when kind == "auto_match"
+    reason: str = ""
+    candidates: tuple[Candidate, ...] = ()
+
+
+@dataclass
+class LibraryIndex:
+    """Index of library albums for O(1) fuzzy lookup.
+
+    `by_full_key` maps (norm_artist, norm_album) → list of album rows.
+    `by_album_only` maps norm_album → list of album rows (fallback when
+    the folder has no reliable artist).
+    """
+    by_full_key: dict[tuple[str, str], list[dict]]
+    by_album_only: dict[str, list[dict]]
+
+
+def build_library_index(albums: list[dict]) -> LibraryIndex:
+    full: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_album: dict[str, list[dict]] = defaultdict(list)
+    for a in albums:
+        na = normalize(a["artist"])
+        nt = normalize(a["title"])
+        full[(na, nt)].append(a)
+        by_album[nt].append(a)
+    return LibraryIndex(dict(full), dict(by_album))
+
+
+def _bit_depth_matches(local: int | None, library: int | None) -> bool:
+    """Unknown on either side is treated as 'compatible'."""
+    if local is None or library is None:
+        return True
+    return local == library
+
+
+def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
+    norm_artist = normalize(meta.artist)
+    norm_album = normalize(meta.album)
+
+    if norm_artist:
+        candidates = index.by_full_key.get((norm_artist, norm_album), [])
+    else:
+        candidates = index.by_album_only.get(norm_album, [])
+
+    if not candidates:
+        return MatchResult(kind="unmatched")
+
+    # Partition candidates by bit-depth compatibility.
+    compatible: list[dict] = []
+    for album in candidates:
+        if _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
+            compatible.append(album)
+
+    # Auto-match only when we have exactly one compatible candidate AND the
+    # folder had a reliable artist (so album-only fallback matches always
+    # need review).
+    if len(compatible) == 1 and norm_artist:
+        a = compatible[0]
+        return MatchResult(
+            kind="auto_match",
+            album_id=a["id"],
+            reason="exact",
+        )
+
+    # Everything else → review. Produce Candidate entries with reasons.
+    review_candidates = []
+    for album in candidates:
+        reasons = []
+        if not norm_artist:
+            reasons.append("missing_artist")
+        if not _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
+            reasons.append(
+                f"bit_depth_mismatch: local={meta.bit_depth} library={album.get('bit_depth')}"
+            )
+        if len(candidates) > 1 and not reasons:
+            reasons.append("multiple_candidates")
+        if not reasons:
+            reasons.append("ambiguous")
+        review_candidates.append(Candidate(
+            album_id=album["id"],
+            source=album["source"],
+            artist=album["artist"],
+            title=album["title"],
+            score=0.9 if norm_artist else 0.6,
+            reason="; ".join(reasons),
+        ))
+
+    return MatchResult(
+        kind="review",
+        candidates=tuple(review_candidates),
+    )
