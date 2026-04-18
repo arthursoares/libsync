@@ -1,7 +1,18 @@
 """Library API routes."""
+import os
+
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+from ..models.schemas import MarkDownloadedRequest
+from ..services.scan import mark_album_downloaded, unmark_album_downloaded
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+def _dedup_db_dir() -> str:
+    db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
+    return os.path.dirname(db_path) or "data"
 
 @router.get("/{source}/albums")
 async def get_albums(request: Request, source: str, page: int = 1, page_size: int = 50,
@@ -24,6 +35,46 @@ async def get_album_detail(request: Request, source: str, album_id: int):
 async def refresh_library(request: Request, source: str):
     service = request.app.state.library_service
     return await service.refresh_library(source)
+
+@router.post("/albums/{album_id}/mark-downloaded")
+async def mark_downloaded(
+    request: Request, album_id: int, body: MarkDownloadedRequest
+):
+    db = request.app.state.db
+    if db.get_album(album_id) is None:
+        return JSONResponse({"error": "Album not found"}, status_code=404)
+
+    sentinel_enabled = (
+        (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
+    )
+    mark_album_downloaded(
+        db, album_id,
+        local_folder_path=body.local_folder_path,
+        dedup_db_dir=_dedup_db_dir(),
+        sentinel_write_enabled=sentinel_enabled,
+    )
+    await request.app.state.event_bus.publish(
+        "album_status_changed",
+        {"album_id": album_id, "status": "complete"},
+    )
+    return db.get_album(album_id)
+
+
+@router.post("/albums/{album_id}/unmark-downloaded")
+async def unmark_downloaded(request: Request, album_id: int):
+    db = request.app.state.db
+    if db.get_album(album_id) is None:
+        return JSONResponse({"error": "Album not found"}, status_code=404)
+
+    unmark_album_downloaded(
+        db, album_id, dedup_db_dir=_dedup_db_dir(),
+    )
+    await request.app.state.event_bus.publish(
+        "album_status_changed",
+        {"album_id": album_id, "status": "not_downloaded"},
+    )
+    return db.get_album(album_id)
+
 
 @router.get("/search/{source}")
 async def search(

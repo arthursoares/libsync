@@ -58,6 +58,10 @@ class SearchResponse(BaseModel):
     source: str
 
 
+class MarkDownloadedRequest(BaseModel):
+    local_folder_path: str | None = None
+
+
 class DownloadRequest(BaseModel):
     source: str
     album_ids: list[str]
