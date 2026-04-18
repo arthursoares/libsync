@@ -254,6 +254,7 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     )
 
 
+import asyncio
 import json
 import logging
 import os
@@ -392,3 +393,96 @@ def unmark_album_downloaded(
         _remove_from_dedup(track_ids, album["source"], dedup_db_dir)
 
     db.clear_album_download_state(album_id)
+
+
+async def run_scan(
+    db,
+    *,
+    download_path: str,
+    dedup_db_dir: str,
+    event_bus,
+    sentinel_write_enabled: bool = True,
+) -> dict:
+    """Walk the download path, classify each album folder, auto-mark
+    exact matches, and return a review/unmatched report.
+
+    Emits ``scan_progress`` after each folder and ``scan_complete`` at
+    the end via the provided event bus. File-system work runs in a
+    worker thread so the event loop stays responsive.
+    """
+    index = build_library_index(db.get_all_albums_for_index())
+
+    root = Path(download_path)
+    if not root.is_dir():
+        return {
+            "status": "complete",
+            "scanned": 0,
+            "sentinel_skipped": 0,
+            "auto_matched": [],
+            "review": [],
+            "unmatched": [],
+        }
+
+    folders = [p for p in sorted(root.iterdir()) if p.is_dir()]
+    total = len(folders)
+
+    auto_matched: list[dict] = []
+    review: list[dict] = []
+    unmatched: list[str] = []
+    sentinel_skipped = 0
+
+    for i, folder in enumerate(folders, start=1):
+        if (folder / ".streamrip.json").exists():
+            sentinel_skipped += 1
+            await event_bus.publish("scan_progress", {"scanned": i, "total": total})
+            continue
+
+        meta = await asyncio.to_thread(read_folder_metadata, folder)
+        if meta is None:
+            await event_bus.publish("scan_progress", {"scanned": i, "total": total})
+            continue
+
+        result = classify(meta, index)
+
+        if result.kind == "auto_match":
+            await asyncio.to_thread(
+                mark_album_downloaded,
+                db, result.album_id,
+                local_folder_path=str(folder),
+                dedup_db_dir=dedup_db_dir,
+                sentinel_write_enabled=sentinel_write_enabled,
+            )
+            auto_matched.append({
+                "album_id": result.album_id,
+                "folder": str(folder),
+                "reason": result.reason,
+            })
+        elif result.kind == "review":
+            review.append({
+                "folder": str(folder),
+                "local_bit_depth": meta.bit_depth,
+                "local_sample_rate": meta.sample_rate,
+                "candidates": [
+                    {
+                        "album_id": c.album_id, "source": c.source,
+                        "artist": c.artist, "title": c.title,
+                        "score": c.score, "reason": c.reason,
+                    }
+                    for c in result.candidates
+                ],
+            })
+        else:
+            unmatched.append(str(folder))
+
+        await event_bus.publish("scan_progress", {"scanned": i, "total": total})
+
+    payload = {
+        "status": "complete",
+        "scanned": total,
+        "sentinel_skipped": sentinel_skipped,
+        "auto_matched": auto_matched,
+        "review": review,
+        "unmatched": unmatched,
+    }
+    await event_bus.publish("scan_complete", payload)
+    return payload
