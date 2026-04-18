@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -112,6 +113,8 @@ class AppDatabase:
                 return
 
             current = row["version"]
+            if current >= SCHEMA_VERSION:
+                return
             if current < 2:
                 self._migrate_to_v2(conn)
             conn.execute(
@@ -135,7 +138,6 @@ class AppDatabase:
         if "local_folder_path" not in existing:
             conn.execute("ALTER TABLE albums ADD COLUMN local_folder_path TEXT")
 
-        import re
         pattern = re.compile(r"(\d+)\s*/\s*([\d.]+)\s*kHz", re.IGNORECASE)
         rows = conn.execute(
             "SELECT id, quality FROM albums WHERE quality IS NOT NULL"
