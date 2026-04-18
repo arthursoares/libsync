@@ -15,6 +15,7 @@
   let qobuzConnected = $state(false);
 
   let tidalConnected = $state(false);
+  let tidalQuality = $state('3');
 
   let downloadPath = $state('');
   let maxConnections = $state(6);
@@ -290,6 +291,7 @@
         qobuzAppSecret = config.qobuz_app_secret ?? '';
         qobuzQuality = String(config.qobuz_quality ?? 3);
         qobuzDownloadBooklets = config.qobuz_download_booklets ?? true;
+        tidalQuality = String(config.tidal_quality ?? 3);
         // Check actual auth status, not just whether token exists
         try {
           const statuses = await api.auth.status();
@@ -330,6 +332,7 @@
         qobuz_app_secret: qobuzAppSecret,
         qobuz_quality: parseInt(qobuzQuality),
         qobuz_download_booklets: qobuzDownloadBooklets,
+        tidal_quality: parseInt(tidalQuality),
         downloads_path: downloadPath,
         max_connections: maxConnections,
         source_subdirectories: sourceSubdirectories,
@@ -557,11 +560,23 @@
   {/if}
 
   {#if tidalError}
-    <div class="settings-row" style="border-bottom: none;">
+    <div class="settings-row">
       <div></div>
       <span style="color: var(--destructive); font-size: var(--text-xs);">{tidalError}</span>
     </div>
   {/if}
+
+  <div class="settings-row" style="border-bottom: none;">
+    <div>
+      <div class="settings-label">Quality</div>
+    </div>
+    <select class="settings-select" bind:value={tidalQuality} style="max-width: 220px;">
+      <option value="0">AAC ~96kbps</option>
+      <option value="1">AAC 320kbps</option>
+      <option value="2">16-bit / 44.1kHz FLAC</option>
+      <option value="3">24-bit / up to 192kHz FLAC</option>
+    </select>
+  </div>
 </div>
 
 <!-- ── Downloads ── -->
