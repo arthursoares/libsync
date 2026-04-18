@@ -1,0 +1,15 @@
+services:
+  libsync:
+    image: ghcr.io/arthursoares/libsync:latest
+    container_name: libsync
+    ports:
+      - "8080:8080"
+    volumes:
+      # Where downloaded music is written. Point this at your library root.
+      - ./music:/music
+      # Persists config, credentials, library DB, and per-source dedup DBs.
+      # Contains streamrip.db, downloads.db, downloads-tidal.db — back this up.
+      - ./data:/data
+    environment:
+      - STREAMRIP_DB_PATH=/data/streamrip.db
+    restart: unless-stopped

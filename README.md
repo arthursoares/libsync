@@ -55,6 +55,19 @@ If you forgot `--recursive`, you can initialize the submodule after the fact:
 git submodule update --init --recursive
 ```
 
+### Using Docker Compose
+
+Prefer compose? A ready-to-use file is at [`docker-compose.example.yml`](docker-compose.example.yml). It pulls the published image from GHCR — no clone, no local build:
+
+```bash
+curl -O https://raw.githubusercontent.com/arthursoares/libsync/main/docker-compose.example.yml
+docker compose -f docker-compose.example.yml up -d
+```
+
+Config, credentials, and the library database land in `./data` next to the compose file — back that directory up to preserve your setup. Downloaded music goes to `./music`; edit the volume mapping if you want it elsewhere.
+
+The `:latest` tag tracks stable releases. Swap to `:main` or `:dev` if you want rolling branch builds.
+
 ## Quick start — local dev
 
 ```bash
