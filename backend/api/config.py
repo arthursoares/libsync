@@ -18,7 +18,8 @@ async def get_config(request: Request) -> AppConfig:
         if key in ("qobuz_quality", "tidal_quality", "max_connections"):
             config_dict[key] = int(value)
         elif key in ("auto_sync_enabled", "qobuz_download_booklets",
-                      "source_subdirectories", "disc_subdirectories", "embed_artwork"):
+                      "source_subdirectories", "disc_subdirectories", "embed_artwork",
+                      "scan_sentinel_write_enabled"):
             config_dict[key] = value.lower() in ("true", "1", "yes")
         else:
             config_dict[key] = value

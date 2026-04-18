@@ -130,6 +130,7 @@ class AppConfig(BaseModel):
     artwork_size: str = "large"
     auto_sync_enabled: bool = False
     auto_sync_interval: str = "6h"
+    scan_sentinel_write_enabled: bool = True
 
 
 class ConfigUpdate(BaseModel):
@@ -150,6 +151,7 @@ class ConfigUpdate(BaseModel):
     artwork_size: str | None = None
     auto_sync_enabled: bool | None = None
     auto_sync_interval: str | None = None
+    scan_sentinel_write_enabled: bool | None = None
 
 
 class EventMessage(BaseModel):

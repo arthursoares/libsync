@@ -29,6 +29,7 @@
 
   let autoSyncEnabled = $state(false);
   let syncInterval = $state('6h');
+  let scanSentinelWriteEnabled = $state(true);
 
   // Sample data for format preview
   const sampleAlbum = {
@@ -314,6 +315,7 @@
 
         autoSyncEnabled = config.auto_sync_enabled ?? false;
         syncInterval = config.auto_sync_interval ?? '6h';
+        scanSentinelWriteEnabled = config.scan_sentinel_write_enabled ?? true;
       }
     } catch (e) {
       // Config not yet set — use defaults
@@ -343,6 +345,7 @@
         artwork_size: artworkSize,
         auto_sync_enabled: autoSyncEnabled,
         auto_sync_interval: syncInterval,
+        scan_sentinel_write_enabled: scanSentinelWriteEnabled,
       });
 
       // Refresh auth status after save (backend hot-reloads clients)
@@ -612,6 +615,23 @@
         <span class="scan-result">{scanResult}</span>
       {/if}
     </div>
+  </div>
+
+  <div class="settings-row">
+    <div>
+      <div class="settings-label">Write Sentinel File</div>
+      <div class="settings-label-sub">Write sentinel file in album folders — disable when scanning a read-only mount.</div>
+    </div>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={scanSentinelWriteEnabled}
+      onclick={() => scanSentinelWriteEnabled = !scanSentinelWriteEnabled}
+      aria-pressed={scanSentinelWriteEnabled}
+      aria-label="Toggle sentinel file writes"
+    >
+      <div class="toggle-thumb"></div>
+    </button>
   </div>
 
   <div class="settings-row">
