@@ -86,3 +86,37 @@ def test_upsert_album_bit_depth_backward_compatible(tmp_path):
     row = db.get_album(album_id)
     assert row["bit_depth"] is None
     assert row["sample_rate"] is None
+
+
+def test_get_all_albums_for_index(tmp_path):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    db.upsert_album(source="qobuz", source_album_id="1",
+                    title="Abbey Road", artist="The Beatles",
+                    bit_depth=24, sample_rate=96.0)
+    db.upsert_album(source="tidal", source_album_id="2",
+                    title="In Rainbows", artist="Radiohead")
+
+    rows = db.get_all_albums_for_index()
+    by_title = {r["title"]: r for r in rows}
+    assert set(by_title) == {"Abbey Road", "In Rainbows"}
+    assert by_title["Abbey Road"]["bit_depth"] == 24
+    assert {"id", "source", "artist", "title", "bit_depth", "sample_rate"} <= set(rows[0])
+
+
+def test_set_and_clear_album_download_state(tmp_path):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    album_id = db.upsert_album(source="qobuz", source_album_id="1",
+                               title="X", artist="Y")
+
+    db.set_album_download_state(album_id, downloaded_at="2026-04-18T10:00:00",
+                                local_folder_path="/music/X")
+    row = db.get_album(album_id)
+    assert row["download_status"] == "complete"
+    assert row["downloaded_at"] == "2026-04-18T10:00:00"
+    assert row["local_folder_path"] == "/music/X"
+
+    db.clear_album_download_state(album_id)
+    row = db.get_album(album_id)
+    assert row["download_status"] == "not_downloaded"
+    assert row["downloaded_at"] is None
+    assert row["local_folder_path"] is None

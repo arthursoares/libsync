@@ -319,6 +319,47 @@ class AppDatabase:
                     (status, album_id),
                 )
 
+    def get_all_albums_for_index(self, user_id: int = 1) -> list[dict]:
+        """Return every album as a lean dict for building a match index."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, source, source_album_id, artist, title,
+                          bit_depth, sample_rate, track_count, download_status
+                   FROM albums WHERE user_id = ?""",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def set_album_download_state(
+        self,
+        album_id: int,
+        *,
+        downloaded_at: str,
+        local_folder_path: str | None = None,
+    ) -> None:
+        """Mark album complete, optionally recording the local folder path."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET download_status = 'complete',
+                       downloaded_at = ?,
+                       local_folder_path = COALESCE(?, local_folder_path)
+                   WHERE id = ?""",
+                (downloaded_at, local_folder_path, album_id),
+            )
+
+    def clear_album_download_state(self, album_id: int) -> None:
+        """Reverse set_album_download_state — back to not_downloaded."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET download_status = 'not_downloaded',
+                       downloaded_at = NULL,
+                       local_folder_path = NULL
+                   WHERE id = ?""",
+                (album_id,),
+            )
+
     def count_albums(self, source: str, user_id: int = 1, status: str | None = None, search: str | None = None) -> int:
         conditions = ["source = ?", "user_id = ?"]
         params: list = [source, user_id]
