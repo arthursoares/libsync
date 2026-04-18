@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
+  import ScanReview from '$lib/components/ScanReview.svelte';
   import {
     isSourceAuthenticated,
   } from '$lib/auth-ui-logic.js';
@@ -74,24 +75,43 @@
   let folderPreview = $derived(previewFormat(folderFormat, sampleAlbum));
   let trackPreview = $derived(previewFormat(trackFormat, sampleTrack) + '.flac');
 
-  let scanning = $state(false);
-  let scanResult = $state<string | null>(null);
+  let scanOpen = $state(false);
+  let scanResultState = $state<any>({ status: 'running', scanned: 0, total: 0 });
+  let scanJobId = $state<string | null>(null);
+  let scanPollTimer: ReturnType<typeof setInterval> | null = null;
+
   let confirmFlush = $state(false);
   let flushResult = $state<string | null>(null);
 
   async function scanDownloads() {
-    scanning = true;
-    scanResult = null;
+    scanOpen = true;
+    scanResultState = { status: 'running', scanned: 0, total: 0 };
     try {
-      const resp = await fetch('/api/downloads/scan', { method: 'POST' });
-      const data = await resp.json();
-      scanResult = `Found ${data.scanned} albums, synced ${data.reconciled} to database`;
-      setTimeout(() => { scanResult = null; }, 8000);
+      const { job_id } = await api.library.scanFuzzy();
+      scanJobId = job_id;
+      scanPollTimer = setInterval(async () => {
+        if (!scanJobId) return;
+        const data = await api.library.scanFuzzyStatus(scanJobId);
+        scanResultState = data;
+        if (data.status !== 'running') {
+          if (scanPollTimer) clearInterval(scanPollTimer);
+          scanPollTimer = null;
+        }
+      }, 500);
     } catch (e: any) {
-      scanResult = 'Scan failed';
-    } finally {
-      scanning = false;
+      scanResultState = { status: 'error', error: e?.message ?? 'Scan failed' };
     }
+  }
+
+  async function onScanConfirm(albumId: number, folder: string) {
+    await api.library.markDownloaded(albumId, folder);
+  }
+
+  function onScanClose() {
+    scanOpen = false;
+    if (scanPollTimer) clearInterval(scanPollTimer);
+    scanPollTimer = null;
+    scanJobId = null;
   }
 
   async function flushDatabase() {
@@ -268,6 +288,7 @@
 
   onDestroy(() => {
     if (_tidalPollTimerId !== null) clearInterval(_tidalPollTimerId);
+    if (scanPollTimer) clearInterval(scanPollTimer);
   });
 
   onMount(async () => {
@@ -608,12 +629,9 @@
       <div class="settings-label-sub">Scan download folder for existing albums and sync with database</div>
     </div>
     <div style="display: flex; gap: var(--space-2); align-items: center;">
-      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanning}>
-        {#if scanning}Scanning...{:else}▸ Scan Folder{/if}
+      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanJobId !== null}>
+        {scanJobId !== null ? 'Scanning…' : '▸ Scan Folder'}
       </button>
-      {#if scanResult}
-        <span class="scan-result">{scanResult}</span>
-      {/if}
     </div>
   </div>
 
@@ -797,6 +815,10 @@
     </select>
   </div>
 </div>
+
+{#if scanOpen}
+  <ScanReview result={scanResultState} onConfirm={onScanConfirm} onClose={onScanClose} />
+{/if}
 
 <style>
   /* ── Page header ── */
