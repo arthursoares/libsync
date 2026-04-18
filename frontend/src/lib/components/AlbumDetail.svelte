@@ -215,6 +215,24 @@
   }
 
   let downloadQueued = $state(false);
+  let markLoading = $state(false);
+
+  async function markOrUnmark() {
+    if (!album) return;
+    markLoading = true;
+    try {
+      if (album.download_status === 'complete') {
+        await api.library.unmarkDownloaded(album.id);
+      } else {
+        await api.library.markDownloaded(album.id, null);
+      }
+      // Reload via the store so the parent prop updates (mirrors the
+      // download-complete refetch pattern already used in this component)
+      await loadAlbumDetail(source, album.id);
+    } finally {
+      markLoading = false;
+    }
+  }
 
   async function handleDownload(force: boolean = false) {
     if (!album) return;
@@ -297,6 +315,17 @@
       </button>
       <button class="btn btn-secondary btn-sm" onclick={() => handleDownload(true)} disabled={downloading} title="Re-download even if already in library">
         ▸ Force
+      </button>
+      <button class="btn btn-secondary btn-sm"
+              disabled={markLoading}
+              onclick={markOrUnmark}>
+        {#if markLoading}
+          …
+        {:else if album.download_status === 'complete'}
+          Unmark as downloaded
+        {:else}
+          Mark as downloaded
+        {/if}
       </button>
       {#if downloadError}
         <span class="download-error">{downloadError}</span>
