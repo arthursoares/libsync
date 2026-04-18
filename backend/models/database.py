@@ -196,6 +196,8 @@ class AppDatabase:
         duration_seconds: int | None = None,
         cover_url: str | None = None,
         quality: str | None = None,
+        bit_depth: int | None = None,
+        sample_rate: float | None = None,
         added_to_library_at: str | None = None,
         user_id: int = 1,
     ) -> int:
@@ -204,8 +206,8 @@ class AppDatabase:
                 """INSERT INTO albums
                    (source, source_album_id, title, artist, release_date, label,
                     genre, track_count, duration_seconds, cover_url, quality,
-                    added_to_library_at, user_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bit_depth, sample_rate, added_to_library_at, user_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source, source_album_id, user_id)
                    DO UPDATE SET
                      title=excluded.title, artist=excluded.artist,
@@ -213,6 +215,8 @@ class AppDatabase:
                      genre=excluded.genre, track_count=excluded.track_count,
                      duration_seconds=excluded.duration_seconds,
                      cover_url=excluded.cover_url, quality=excluded.quality,
+                     bit_depth=COALESCE(excluded.bit_depth, albums.bit_depth),
+                     sample_rate=COALESCE(excluded.sample_rate, albums.sample_rate),
                      added_to_library_at=COALESCE(
                          excluded.added_to_library_at,
                          albums.added_to_library_at
@@ -221,7 +225,8 @@ class AppDatabase:
                 (
                     source, source_album_id, title, artist, release_date,
                     label, genre, track_count, duration_seconds, cover_url,
-                    quality, added_to_library_at, user_id,
+                    quality, bit_depth, sample_rate,
+                    added_to_library_at, user_id,
                 ),
             )
             row = conn.execute(

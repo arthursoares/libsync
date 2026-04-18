@@ -61,3 +61,28 @@ def test_v2_idempotent(tmp_path):
     assert "bit_depth" in cols
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     assert version == 2
+
+
+def test_upsert_album_persists_quality_meta(tmp_path):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    album_id = db.upsert_album(
+        source="qobuz",
+        source_album_id="100",
+        title="Random",
+        artist="Daft Punk",
+        bit_depth=24,
+        sample_rate=44.1,
+    )
+    row = db.get_album(album_id)
+    assert row["bit_depth"] == 24
+    assert row["sample_rate"] == 44.1
+
+
+def test_upsert_album_bit_depth_backward_compatible(tmp_path):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    album_id = db.upsert_album(
+        source="qobuz", source_album_id="101", title="X", artist="Y"
+    )
+    row = db.get_album(album_id)
+    assert row["bit_depth"] is None
+    assert row["sample_rate"] is None
