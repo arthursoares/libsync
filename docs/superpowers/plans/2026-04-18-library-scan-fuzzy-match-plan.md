@@ -1704,17 +1704,15 @@ git commit -m "feat(scan): async scan job that classifies folders and auto-marks
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/test_api_routes.py`, find the config-related test block and add:
+In `tests/test_api_routes.py`, inside `class TestConfigRoutes`, add (note: `client` is an `httpx.AsyncClient`; all calls must be awaited):
 
 ```python
-def test_config_round_trip_includes_scan_sentinel_toggle(client):
-    resp = client.patch("/api/config", json={"scan_sentinel_write_enabled": False})
-    assert resp.status_code == 200
-    got = client.get("/api/config").json()
-    assert got["scan_sentinel_write_enabled"] is False
+    async def test_config_round_trip_includes_scan_sentinel_toggle(self, client):
+        resp = await client.patch("/api/config", json={"scan_sentinel_write_enabled": False})
+        assert resp.status_code == 200
+        got = (await client.get("/api/config")).json()
+        assert got["scan_sentinel_write_enabled"] is False
 ```
-
-(Reuse the existing `client` fixture.)
 
 - [ ] **Step 2: Run — expect failure**
 
@@ -1792,64 +1790,69 @@ git commit -m "feat(scan): scan_sentinel_write_enabled config toggle for read-on
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_api_library_scan.py`:
+Create `tests/test_api_library_scan.py`. The existing suite uses `httpx.AsyncClient` via `app` + `client` fixtures from `test_api_routes.py`; re-declare them locally (or import from a shared conftest if one gets added later). All HTTP calls must be awaited.
 
 ```python
 """API tests for /scan-fuzzy, /mark-downloaded, /unmark-downloaded."""
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+
+from backend.main import create_app
 
 
 @pytest.fixture
-def client_with_album(client):
-    # `client` fixture creates a fresh AppDatabase on app.state.db.
-    db = client.app.state.db
-    album_id = db.upsert_album(
+def app():
+    return create_app(db_path=":memory:")
+
+
+@pytest.fixture
+async def client(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+def album_id(app):
+    db = app.state.db
+    aid = db.upsert_album(
         source="qobuz", source_album_id="42",
         title="Abbey Road", artist="The Beatles",
         track_count=17, bit_depth=24, sample_rate=96.0,
     )
-    db.upsert_track(album_id=album_id, source_track_id="t1",
+    db.upsert_track(album_id=aid, source_track_id="t1",
                     title="Come Together", artist="The Beatles",
                     track_number=1)
-    return client, album_id
+    return aid
 
 
-def test_mark_downloaded_happy_path(client_with_album):
-    client, album_id = client_with_album
-    resp = client.post(
-        f"/api/library/albums/{album_id}/mark-downloaded",
-        json={"local_folder_path": None},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["download_status"] == "complete"
+class TestMarkDownloaded:
+    async def test_happy_path(self, client, album_id):
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["download_status"] == "complete"
 
+    async def test_with_folder(self, client, album_id, tmp_path):
+        folder = tmp_path / "Beatles - Abbey Road"
+        folder.mkdir()
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": str(folder)},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["local_folder_path"] == str(folder)
 
-def test_mark_downloaded_with_folder(client_with_album, tmp_path):
-    client, album_id = client_with_album
-    folder = tmp_path / "Beatles - Abbey Road"
-    folder.mkdir()
-    resp = client.post(
-        f"/api/library/albums/{album_id}/mark-downloaded",
-        json={"local_folder_path": str(folder)},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["local_folder_path"] == str(folder)
+    async def test_unmark_reverses(self, client, album_id):
+        await client.post(f"/api/library/albums/{album_id}/mark-downloaded", json={})
+        resp = await client.post(f"/api/library/albums/{album_id}/unmark-downloaded")
+        assert resp.status_code == 200
+        assert resp.json()["download_status"] == "not_downloaded"
 
-
-def test_unmark_downloaded(client_with_album):
-    client, album_id = client_with_album
-    client.post(f"/api/library/albums/{album_id}/mark-downloaded", json={})
-    resp = client.post(f"/api/library/albums/{album_id}/unmark-downloaded")
-    assert resp.status_code == 200
-    assert resp.json()["download_status"] == "not_downloaded"
-
-
-def test_mark_unknown_album_returns_404(client):
-    resp = client.post("/api/library/albums/99999/mark-downloaded", json={})
-    assert resp.status_code == 404
+    async def test_unknown_album_returns_404(self, client):
+        resp = await client.post("/api/library/albums/99999/mark-downloaded", json={})
+        assert resp.status_code == 404
 ```
 
 - [ ] **Step 2: Run — expect failure**
@@ -1951,59 +1954,70 @@ git commit -m "feat(api): mark-downloaded / unmark-downloaded endpoints"
 Append to `tests/test_api_library_scan.py`:
 
 ```python
-def test_scan_fuzzy_starts_job_and_returns_id(client_with_album, tmp_path):
-    client, _ = client_with_album
-    client.app.state.db.set_config("downloads_path", str(tmp_path / "music"))
-    (tmp_path / "music").mkdir()
-
-    resp = client.post("/api/library/scan-fuzzy")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "job_id" in body
+import asyncio
 
 
-def test_scan_fuzzy_concurrent_returns_409(client_with_album, tmp_path, monkeypatch):
-    client, _ = client_with_album
-    client.app.state.db.set_config("downloads_path", str(tmp_path / "music"))
-    (tmp_path / "music").mkdir()
+class TestScanFuzzy:
+    async def test_starts_job_and_returns_id(self, client, app, album_id, tmp_path):
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        (tmp_path / "music").mkdir()
 
-    # Force the job to hang so we can fire a concurrent start. The route
-    # imports the `scan` module and looks up `run_scan` at call time, so
-    # monkeypatching the attribute on the module is what we want.
-    import backend.services.scan as scan_mod
+        resp = await client.post("/api/library/scan-fuzzy")
+        assert resp.status_code == 200
+        assert "job_id" in resp.json()
+        # Let the background task finish so it doesn't leak into the next test.
+        job_id = resp.json()["job_id"]
+        for _ in range(20):
+            st = (await client.get(f"/api/library/scan-fuzzy/{job_id}")).json()
+            if st["status"] == "complete":
+                break
+            await asyncio.sleep(0.05)
 
-    original = scan_mod.run_scan
+    async def test_concurrent_returns_409(
+        self, client, app, album_id, tmp_path, monkeypatch
+    ):
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        (tmp_path / "music").mkdir()
 
-    async def slow(*args, **kwargs):
-        import asyncio
-        await asyncio.sleep(0.3)
-        return await original(*args, **kwargs)
+        # Force the job to hang so we can fire a concurrent start. The route
+        # imports the module (`from ..services import scan as scan_service`)
+        # and looks up `run_scan` at call time, so monkeypatching the
+        # attribute on the module is what we want.
+        import backend.services.scan as scan_mod
 
-    monkeypatch.setattr(scan_mod, "run_scan", slow)
+        original = scan_mod.run_scan
 
-    r1 = client.post("/api/library/scan-fuzzy")
-    r2 = client.post("/api/library/scan-fuzzy")
-    assert r1.status_code == 200
-    assert r2.status_code == 409
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return await original(*args, **kwargs)
 
+        monkeypatch.setattr(scan_mod, "run_scan", slow)
 
-def test_scan_fuzzy_status_endpoint(client_with_album, tmp_path):
-    client, _ = client_with_album
-    client.app.state.db.set_config("downloads_path", str(tmp_path / "music"))
-    (tmp_path / "music").mkdir()
+        r1 = await client.post("/api/library/scan-fuzzy")
+        r2 = await client.post("/api/library/scan-fuzzy")
+        assert r1.status_code == 200
+        assert r2.status_code == 409
+        # Drain the first job.
+        job_id = r1.json()["job_id"]
+        for _ in range(20):
+            st = (await client.get(f"/api/library/scan-fuzzy/{job_id}")).json()
+            if st["status"] != "running":
+                break
+            await asyncio.sleep(0.1)
 
-    job_id = client.post("/api/library/scan-fuzzy").json()["job_id"]
-    # TestClient runs the background task to completion synchronously via
-    # the startup/shutdown lifespan if awaited; poll briefly.
-    import time
-    for _ in range(20):
-        resp = client.get(f"/api/library/scan-fuzzy/{job_id}")
-        if resp.json()["status"] == "complete":
-            break
-        time.sleep(0.05)
-    body = resp.json()
-    assert body["status"] == "complete"
-    assert "auto_matched" in body
+    async def test_status_endpoint(self, client, app, album_id, tmp_path):
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        (tmp_path / "music").mkdir()
+
+        job_id = (await client.post("/api/library/scan-fuzzy")).json()["job_id"]
+        for _ in range(40):
+            resp = await client.get(f"/api/library/scan-fuzzy/{job_id}")
+            if resp.json()["status"] == "complete":
+                break
+            await asyncio.sleep(0.05)
+        body = resp.json()
+        assert body["status"] == "complete"
+        assert "auto_matched" in body
 ```
 
 - [ ] **Step 2: Run — expect failure**
