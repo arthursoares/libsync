@@ -395,6 +395,36 @@ def unmark_album_downloaded(
     db.clear_album_download_state(album_id)
 
 
+def _find_album_folders(root: Path, max_depth: int = 3) -> list[Path]:
+    """Return folders that look like albums (contain audio files directly).
+
+    Walks the tree down to `max_depth` levels. A folder with audio files
+    directly is treated as an album — its subfolders are NOT recursed into
+    (prevents double-counting parent Album folders vs Disc 1/, Disc 2/
+    children). Multi-disc albums with Disc N/ subdirectories will produce
+    one candidate per disc folder; the matcher will surface duplicates for
+    review, which is an acceptable trade-off for now.
+    """
+    results: list[Path] = []
+
+    def walk(folder: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        has_audio = any(
+            p.is_file() and p.suffix.lower() in _AUDIO_EXTS
+            for p in folder.iterdir()
+        )
+        if has_audio:
+            results.append(folder)
+            return
+        for child in sorted(folder.iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                walk(child, depth + 1)
+
+    walk(root, 0)
+    return sorted(results)
+
+
 async def run_scan(
     db,
     *,
@@ -423,7 +453,7 @@ async def run_scan(
             "unmatched": [],
         }
 
-    folders = [p for p in sorted(root.iterdir()) if p.is_dir()]
+    folders = _find_album_folders(root)
     total = len(folders)
 
     auto_matched: list[dict] = []

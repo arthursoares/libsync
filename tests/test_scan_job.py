@@ -108,3 +108,58 @@ async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch)
     assert result["sentinel_skipped"] == 1
     assert result["auto_matched"] == []
     assert result["review"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch):
+    music = tmp_path / "music"
+    # Library seeds "Abbey Road" + "Revolver" by The Beatles in the library fixture.
+    _touch(music / "The Beatles" / "(1969) Abbey Road [FLAC-24-96]" / "01.flac")
+    _touch(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]" / "01.flac")
+    _touch(music / "_tuning" / "TestSignal.wav")  # no artist folder above
+
+    _patch_mutagen(monkeypatch, {
+        "Abbey Road": {"albumartist": "The Beatles", "album": "Abbey Road", "_bd": 24},
+        "Revolver":   {"albumartist": "The Beatles", "album": "Revolver",   "_bd": 24},
+        "TestSignal": {"albumartist": "Test", "album": "Tuning"},
+    })
+    event_bus = AsyncMock()
+
+    result = await run_scan(
+        library, download_path=str(music), dedup_db_dir=str(tmp_path),
+        event_bus=event_bus, sentinel_write_enabled=False,
+    )
+
+    # Two library matches land in auto_matched; _tuning is unmatched.
+    auto_ids = {e["album_id"] for e in result["auto_matched"]}
+    assert auto_ids == {1, 2}
+    assert any("_tuning" in u for u in result["unmatched"])
+    assert result["scanned"] == 3
+
+
+def test_find_album_folders_picks_leaves_with_audio(tmp_path):
+    from backend.services.scan import _find_album_folders
+
+    # Artist/Album/track.flac
+    (tmp_path / "Artist A" / "Album 1").mkdir(parents=True)
+    (tmp_path / "Artist A" / "Album 1" / "01.flac").touch()
+    (tmp_path / "Artist A" / "Album 2").mkdir()
+    (tmp_path / "Artist A" / "Album 2" / "01.mp3").touch()
+    # Loose audio at top level
+    (tmp_path / "_loose").mkdir()
+    (tmp_path / "_loose" / "tone.wav").touch()
+    # Empty artist dir (no audio anywhere below)
+    (tmp_path / "Empty Artist" / "Empty Album").mkdir(parents=True)
+    # Multi-disc album: Abbey Road with Disc 1/, Disc 2/ both containing audio
+    # — we treat the disc leaves as two album candidates (acceptable compromise;
+    # the matcher will see the same folder-name twice but a multi-disc album
+    # really is one album; document in a comment that multi-disc libraries may
+    # produce duplicate candidates).
+    (tmp_path / "Beatles" / "Abbey Road" / "Disc 1").mkdir(parents=True)
+    (tmp_path / "Beatles" / "Abbey Road" / "Disc 1" / "01.flac").touch()
+    (tmp_path / "Beatles" / "Abbey Road" / "Disc 2").mkdir()
+    (tmp_path / "Beatles" / "Abbey Road" / "Disc 2" / "01.flac").touch()
+
+    found = _find_album_folders(tmp_path)
+    names = {p.name for p in found}
+    assert names == {"Album 1", "Album 2", "_loose", "Disc 1", "Disc 2"}
