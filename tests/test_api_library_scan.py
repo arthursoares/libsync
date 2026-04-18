@@ -41,9 +41,10 @@ class TestMarkDownloaded:
         assert resp.status_code == 200
         assert resp.json()["download_status"] == "complete"
 
-    async def test_with_folder(self, client, album_id, tmp_path):
+    async def test_with_folder(self, client, app, album_id, tmp_path):
         folder = tmp_path / "Beatles - Abbey Road"
         folder.mkdir()
+        app.state.db.set_config("downloads_path", str(tmp_path))
         resp = await client.post(
             f"/api/library/albums/{album_id}/mark-downloaded",
             json={"local_folder_path": str(folder)},
@@ -60,6 +61,37 @@ class TestMarkDownloaded:
     async def test_unknown_album_returns_404(self, client):
         resp = await client.post("/api/library/albums/99999/mark-downloaded", json={})
         assert resp.status_code == 404
+
+    async def test_rejects_path_outside_downloads_root(self, client, app, album_id, tmp_path):
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        (tmp_path / "music").mkdir()
+        # Request a path that escapes the downloads root.
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": str(tmp_path / "elsewhere")},
+        )
+        assert resp.status_code == 400
+
+    async def test_rejects_dot_dot_traversal(self, client, app, album_id, tmp_path):
+        downloads_root = tmp_path / "music"
+        downloads_root.mkdir()
+        app.state.db.set_config("downloads_path", str(downloads_root))
+        # Traverses back up with ..
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": f"{downloads_root}/../evil"},
+        )
+        assert resp.status_code == 400
+
+    async def test_accepts_path_inside_downloads_root(self, client, app, album_id, tmp_path):
+        downloads_root = tmp_path / "music"
+        (downloads_root / "Album").mkdir(parents=True)
+        app.state.db.set_config("downloads_path", str(downloads_root))
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": str(downloads_root / "Album")},
+        )
+        assert resp.status_code == 200
 
 
 class TestScanFuzzy:

@@ -137,6 +137,36 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
     assert result["scanned"] == 3
 
 
+def test_find_album_folders_skips_unreadable_dirs(tmp_path):
+    """Unreadable subdirs don't abort the walk; they're recorded separately."""
+    import os
+
+    from backend.services.scan import _find_album_folders
+
+    (tmp_path / "good" / "album").mkdir(parents=True)
+    (tmp_path / "good" / "album" / "01.flac").touch()
+
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "album").mkdir()
+    (bad / "album" / "01.flac").touch()
+    bad.chmod(0o000)
+
+    if os.geteuid() == 0:
+        import pytest
+        bad.chmod(0o755)
+        pytest.skip("cannot test permissions as root")
+
+    try:
+        found, skipped = _find_album_folders(tmp_path)
+    finally:
+        bad.chmod(0o755)  # so pytest cleanup works
+
+    names = {p.name for p in found}
+    assert "album" in names  # the good side still came through
+    assert any("bad" in s for s in skipped)
+
+
 def test_find_album_folders_picks_leaves_with_audio(tmp_path):
     from backend.services.scan import _find_album_folders
 
@@ -160,6 +190,7 @@ def test_find_album_folders_picks_leaves_with_audio(tmp_path):
     (tmp_path / "Beatles" / "Abbey Road" / "Disc 2").mkdir()
     (tmp_path / "Beatles" / "Abbey Road" / "Disc 2" / "01.flac").touch()
 
-    found = _find_album_folders(tmp_path)
+    found, skipped = _find_album_folders(tmp_path)
     names = {p.name for p in found}
     assert names == {"Album 1", "Album 2", "_loose", "Disc 1", "Disc 2"}
+    assert skipped == []

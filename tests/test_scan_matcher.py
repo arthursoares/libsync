@@ -110,3 +110,24 @@ def test_missing_artist_matches_by_album_only_to_review(tmp_path):
     assert result.kind == "review"
     assert result.candidates[0].album_id == 1
     assert "missing_artist" in result.candidates[0].reason
+
+
+def test_multi_candidate_narrowed_by_bit_depth_still_review(tmp_path):
+    """Qobuz + Tidal copies of same album, only Qobuz bit_depth matches local —
+    don't auto-match; this ambiguity deserves review.
+    """
+    meta = FolderMeta(
+        folder=_folder(tmp_path),
+        artist="Radiohead", album="In Rainbows",
+        bit_depth=24, sample_rate=96.0, track_count=10, source="tags",
+    )
+    idx = _library([
+        {"id": 10, "source": "qobuz", "artist": "Radiohead",
+         "title": "In Rainbows", "bit_depth": 24, "sample_rate": 96.0},
+        {"id": 11, "source": "tidal", "artist": "Radiohead",
+         "title": "In Rainbows", "bit_depth": 16, "sample_rate": 44.1},
+    ])
+    result = classify(meta, idx)
+    assert result.kind == "review"
+    # Both candidates should still appear in the review list.
+    assert {c.album_id for c in result.candidates} == {10, 11}

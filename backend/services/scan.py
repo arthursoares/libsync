@@ -214,10 +214,13 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
         if _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
             compatible.append(album)
 
-    # Auto-match only when we have exactly one compatible candidate AND the
-    # folder had a reliable artist (so album-only fallback matches always
-    # need review).
-    if len(compatible) == 1 and norm_artist:
+    # Auto-match only when we have exactly one candidate overall AND exactly
+    # one compatible candidate AND the folder had a reliable artist (so
+    # album-only fallback matches always need review). Requiring the original
+    # pool to also be a singleton prevents silently auto-matching when the
+    # bit-depth filter happened to narrow multiple candidates (e.g. Qobuz +
+    # Tidal copies of the same album) down to one.
+    if len(candidates) == 1 and len(compatible) == 1 and norm_artist:
         a = compatible[0]
         return MatchResult(
             kind="auto_match",
@@ -395,8 +398,11 @@ def unmark_album_downloaded(
     db.clear_album_download_state(album_id)
 
 
-def _find_album_folders(root: Path, max_depth: int = 3) -> list[Path]:
-    """Return folders that look like albums (contain audio files directly).
+def _find_album_folders(root: Path, max_depth: int = 3) -> tuple[list[Path], list[str]]:
+    """Yield folders that look like albums (contain audio files directly).
+
+    Returns (album_folders, skipped_dirs). Unreadable directories are
+    logged and recorded in skipped_dirs rather than aborting the walk.
 
     Walks the tree down to `max_depth` levels. A folder with audio files
     directly is treated as an album — its subfolders are NOT recursed into
@@ -406,23 +412,31 @@ def _find_album_folders(root: Path, max_depth: int = 3) -> list[Path]:
     review, which is an acceptable trade-off for now.
     """
     results: list[Path] = []
+    skipped: list[str] = []
 
     def walk(folder: Path, depth: int) -> None:
         if depth > max_depth:
             return
+        try:
+            children = list(folder.iterdir())
+        except OSError as e:
+            logger.warning("scan: skipping unreadable folder %s: %s", folder, e)
+            skipped.append(str(folder))
+            return
+
         has_audio = any(
             p.is_file() and p.suffix.lower() in _AUDIO_EXTS
-            for p in folder.iterdir()
+            for p in children
         )
         if has_audio:
             results.append(folder)
             return
-        for child in sorted(folder.iterdir()):
+        for child in sorted(children):
             if child.is_dir() and not child.name.startswith("."):
                 walk(child, depth + 1)
 
     walk(root, 0)
-    return sorted(results)
+    return sorted(results), skipped
 
 
 async def run_scan(
@@ -448,12 +462,13 @@ async def run_scan(
             "status": "complete",
             "scanned": 0,
             "sentinel_skipped": 0,
+            "skipped_dirs": [],
             "auto_matched": [],
             "review": [],
             "unmatched": [],
         }
 
-    folders = _find_album_folders(root)
+    folders, skipped_dirs = _find_album_folders(root)
     total = len(folders)
 
     auto_matched: list[dict] = []
@@ -510,6 +525,7 @@ async def run_scan(
         "status": "complete",
         "scanned": total,
         "sentinel_skipped": sentinel_skipped,
+        "skipped_dirs": skipped_dirs,
         "auto_matched": auto_matched,
         "review": review,
         "unmatched": unmatched,

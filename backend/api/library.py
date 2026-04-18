@@ -1,10 +1,14 @@
 """Library API routes."""
 import asyncio
+import logging
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("streamrip")
 
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
@@ -50,9 +54,29 @@ async def mark_downloaded(
     sentinel_enabled = (
         (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
     )
+
+    resolved_path = body.local_folder_path
+    if body.local_folder_path is not None:
+        downloads_root_cfg = db.get_config("downloads_path") or "/music"
+        try:
+            resolved = Path(body.local_folder_path).resolve(strict=False)
+            root = Path(downloads_root_cfg).resolve(strict=False)
+        except (OSError, ValueError):
+            return JSONResponse(
+                {"error": "Invalid local_folder_path"}, status_code=400
+            )
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return JSONResponse(
+                {"error": "local_folder_path must be inside the configured downloads path"},
+                status_code=400,
+            )
+        resolved_path = str(resolved)
+
     mark_album_downloaded(
         db, album_id,
-        local_folder_path=body.local_folder_path,
+        local_folder_path=resolved_path,
         dedup_db_dir=_dedup_db_dir(),
         sentinel_write_enabled=sentinel_enabled,
     )
@@ -107,8 +131,12 @@ async def start_scan(request: Request):
                 sentinel_write_enabled=sentinel_enabled,
             )
             app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
-        except Exception as e:
-            app.state.scan_jobs[job_id] = {"status": "error", "result": {"error": str(e)}}
+        except Exception:
+            logger.exception("scan-fuzzy job %s failed", job_id)
+            app.state.scan_jobs[job_id] = {
+                "status": "error",
+                "result": {"error": "Scan failed — see server logs"},
+            }
         finally:
             app.state.active_scan_job = None
 
