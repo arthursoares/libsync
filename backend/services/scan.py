@@ -252,3 +252,143 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
         kind="review",
         candidates=tuple(review_candidates),
     )
+
+
+import json
+import logging
+import os
+import sqlite3
+from datetime import datetime
+
+logger = logging.getLogger("streamrip")
+
+_DEDUP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS downloads (
+    id TEXT PRIMARY KEY
+);
+"""
+
+
+def _dedup_db_path(source: str, dedup_db_dir: str) -> str:
+    fname = "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
+    return os.path.join(dedup_db_dir, fname)
+
+
+def _populate_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
+    """Insert track IDs into the per-source dedup DB. Idempotent."""
+    path = _dedup_db_path(source, dedup_db_dir)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(_DEDUP_SCHEMA)
+        conn.executemany(
+            "INSERT OR IGNORE INTO downloads (id) VALUES (?)",
+            [(tid,) for tid in track_ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _remove_from_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
+    path = _dedup_db_path(source, dedup_db_dir)
+    if not os.path.exists(path):
+        return
+    conn = sqlite3.connect(path)
+    try:
+        conn.executemany(
+            "DELETE FROM downloads WHERE id = ?",
+            [(tid,) for tid in track_ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sentinel_payload(album: dict, downloaded_at: str) -> dict:
+    return {
+        "source": album["source"],
+        "album_id": album["source_album_id"],
+        "title": album["title"],
+        "artist": album["artist"],
+        "tracks_count": album.get("track_count"),
+        "downloaded_at": downloaded_at,
+    }
+
+
+def _write_sentinel(folder: str, payload: dict) -> bool:
+    """Best-effort sentinel write. Returns True on success."""
+    try:
+        with open(os.path.join(folder, ".streamrip.json"), "w") as f:
+            json.dump(payload, f)
+        return True
+    except OSError as e:
+        logger.warning("scan: could not write sentinel to %s: %s", folder, e)
+        return False
+
+
+def _remove_sentinel(folder: str | None) -> None:
+    if not folder:
+        return
+    try:
+        os.remove(os.path.join(folder, ".streamrip.json"))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("scan: could not remove sentinel at %s: %s", folder, e)
+
+
+def mark_album_downloaded(
+    db,
+    album_id: int,
+    *,
+    local_folder_path: str | None,
+    dedup_db_dir: str,
+    sentinel_write_enabled: bool = True,
+    now: datetime | None = None,
+) -> None:
+    """Mark an album complete in DB, dedup DB, and optionally on disk.
+
+    Idempotent — calling repeatedly is safe. Sentinel writes degrade
+    gracefully on read-only mounts.
+    """
+    album = db.get_album(album_id)
+    if album is None:
+        raise ValueError(f"Album {album_id} not found")
+
+    downloaded_at = (now or datetime.now()).isoformat()
+    db.set_album_download_state(
+        album_id,
+        downloaded_at=downloaded_at,
+        local_folder_path=local_folder_path,
+    )
+
+    track_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
+    if track_ids:
+        _populate_dedup(track_ids, album["source"], dedup_db_dir)
+
+    if local_folder_path and sentinel_write_enabled:
+        _write_sentinel(
+            local_folder_path,
+            _sentinel_payload(album, downloaded_at),
+        )
+
+
+def unmark_album_downloaded(
+    db,
+    album_id: int,
+    *,
+    dedup_db_dir: str,
+) -> None:
+    album = db.get_album(album_id)
+    if album is None:
+        raise ValueError(f"Album {album_id} not found")
+
+    folder = album.get("local_folder_path")
+    _remove_sentinel(folder)
+
+    track_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
+    if track_ids:
+        _remove_from_dedup(track_ids, album["source"], dedup_db_dir)
+
+    db.clear_album_download_state(album_id)
