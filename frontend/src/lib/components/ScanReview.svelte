@@ -157,8 +157,11 @@
   }
   .panel {
     position: absolute; top: 0; right: 0; bottom: 0; width: min(640px, 90vw);
-    background: var(--surface); padding: var(--space-4);
-    overflow-y: auto; box-shadow: -4px 0 0 var(--shadow-color, #000);
+    background: var(--canvas-raised); color: var(--text-primary);
+    padding: var(--space-4);
+    overflow-y: auto;
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
   }
   header {
     display: flex; justify-content: space-between; align-items: center;
@@ -166,14 +169,14 @@
   }
   .close {
     background: none; border: none; font-size: 1.5rem; cursor: pointer;
-    color: var(--fg);
+    color: var(--text-primary);
   }
-  .summary { color: var(--muted); font-size: var(--text-sm); }
+  .summary { color: var(--text-secondary); font-size: var(--text-sm); }
   .section-header {
     background: none; border: none; font-family: inherit;
     font-size: var(--text-base); padding: var(--space-2) 0;
     cursor: pointer; text-align: left; width: 100%;
-    border-top: 1px solid var(--border); color: var(--fg);
+    border-top: 1px solid var(--border); color: var(--text-primary);
   }
   .list { list-style: none; padding: 0; margin: 0 0 var(--space-3) 0; }
   .list li { padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
@@ -182,8 +185,8 @@
     display: flex; justify-content: space-between; gap: var(--space-2);
     padding: var(--space-1) 0;
   }
-  .candidate .reason { font-size: var(--text-xs); color: var(--muted); }
-  .candidate .source { font-size: var(--text-xs); color: var(--muted); }
+  .candidate .reason { font-size: var(--text-xs); color: var(--text-secondary); }
+  .candidate .source { font-size: var(--text-xs); color: var(--text-secondary); }
   .unmatched-actions { margin-bottom: var(--space-2); }
   .error { color: var(--destructive); }
   code { font-family: var(--font-mono); font-size: var(--text-xs); }
