@@ -8,11 +8,11 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-logger = logging.getLogger("streamrip")
-
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
+
+logger = logging.getLogger("streamrip")
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -20,6 +20,45 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 def _dedup_db_dir() -> str:
     db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
     return os.path.dirname(db_path) or "data"
+
+
+def _resolve_downloads_root(db) -> str:
+    """Resolve the downloads root using the same chain as DownloadService:
+    DB config → STREAMRIP_DOWNLOADS_PATH env var → '/music' fallback.
+    """
+    return (
+        db.get_config("downloads_path")
+        or os.environ.get("STREAMRIP_DOWNLOADS_PATH")
+        or "/music"
+    )
+
+
+def _validate_local_folder_path(db, raw: str | None) -> tuple[str | None, JSONResponse | None]:
+    """Resolve `raw` and verify it's inside the configured downloads root.
+
+    Returns (resolved_path, None) on success; (None, error_response) on failure.
+    Sync — intentionally extracted so the async route doesn't call Path.resolve()
+    on the event loop.
+    """
+    if raw is None:
+        return None, None
+    downloads_root_cfg = _resolve_downloads_root(db)
+    try:
+        resolved = Path(raw).resolve(strict=False)
+        root = Path(downloads_root_cfg).resolve(strict=False)
+    except (OSError, ValueError):
+        return None, JSONResponse(
+            {"error": "Invalid local_folder_path"}, status_code=400
+        )
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None, JSONResponse(
+            {"error": "local_folder_path must be inside the configured downloads path"},
+            status_code=400,
+        )
+    return str(resolved), None
+
 
 @router.get("/{source}/albums")
 async def get_albums(request: Request, source: str, page: int = 1, page_size: int = 50,
@@ -34,7 +73,6 @@ async def get_album_detail(request: Request, source: str, album_id: int):
     service = request.app.state.library_service
     result = await service.get_album_detail(album_id)
     if result is None:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "Album not found"}, status_code=404)
     return result
 
@@ -55,24 +93,9 @@ async def mark_downloaded(
         (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
     )
 
-    resolved_path = body.local_folder_path
-    if body.local_folder_path is not None:
-        downloads_root_cfg = db.get_config("downloads_path") or "/music"
-        try:
-            resolved = Path(body.local_folder_path).resolve(strict=False)
-            root = Path(downloads_root_cfg).resolve(strict=False)
-        except (OSError, ValueError):
-            return JSONResponse(
-                {"error": "Invalid local_folder_path"}, status_code=400
-            )
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            return JSONResponse(
-                {"error": "local_folder_path must be inside the configured downloads path"},
-                status_code=400,
-            )
-        resolved_path = str(resolved)
+    resolved_path, err = _validate_local_folder_path(db, body.local_folder_path)
+    if err is not None:
+        return err
 
     mark_album_downloaded(
         db, album_id,
@@ -112,7 +135,7 @@ async def start_scan(request: Request):
         )
 
     db = app.state.db
-    download_path = db.get_config("downloads_path") or "/music"
+    download_path = _resolve_downloads_root(db)
     sentinel_enabled = (
         (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
     )
@@ -140,7 +163,9 @@ async def start_scan(request: Request):
         finally:
             app.state.active_scan_job = None
 
-    asyncio.create_task(runner())
+    task = asyncio.create_task(runner())
+    # Keep a strong reference so the task is not garbage-collected before completion.
+    app.state.scan_jobs[job_id]["_task"] = task
     return {"job_id": job_id}
 
 
@@ -194,6 +219,5 @@ async def get_playlist(request: Request, source: str, playlist_id: int):
     service = request.app.state.library_service
     result = await service.get_playlist(source, playlist_id)
     if result is None:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "Playlist not found"}, status_code=404)
     return result

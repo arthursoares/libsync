@@ -167,6 +167,33 @@ def test_find_album_folders_skips_unreadable_dirs(tmp_path):
     assert any("bad" in s for s in skipped)
 
 
+def test_find_album_folders_skips_symlinks(tmp_path):
+    """Symlinked directories must not be recursed into — they can escape the root."""
+    import os
+    from backend.services.scan import _find_album_folders
+
+    inside = tmp_path / "inside" / "album"
+    inside.mkdir(parents=True)
+    (inside / "01.flac").touch()
+
+    # Create a target OUTSIDE tmp_path (in a scratch area), with audio
+    outside_root = tmp_path.parent / "scan-symlink-outside"
+    outside_root.mkdir(exist_ok=True)
+    (outside_root / "01.flac").touch()
+    try:
+        # Place a symlink inside tmp_path pointing at the outside dir
+        os.symlink(outside_root, tmp_path / "escape")
+        found, skipped = _find_album_folders(tmp_path)
+        names = {p.name for p in found}
+        # Only the real inside album, NOT the symlinked escape dir
+        assert names == {"album"}
+        assert any("escape" in s for s in skipped)
+    finally:
+        # Clean up the scratch area
+        (outside_root / "01.flac").unlink(missing_ok=True)
+        outside_root.rmdir()
+
+
 def test_find_album_folders_picks_leaves_with_audio(tmp_path):
     from backend.services.scan import _find_album_folders
 

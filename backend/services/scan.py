@@ -5,8 +5,21 @@ for the design rationale.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import os
 import re
+import sqlite3
 import unicodedata
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+import mutagen
+
+logger = logging.getLogger("streamrip")
 
 _PAREN_SUFFIX_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]\s*$")
 _LEADING_THE_RE = re.compile(r"^the\s+", re.IGNORECASE)
@@ -38,11 +51,6 @@ def normalize(value: str | None) -> str:
     s = _WHITESPACE_RE.sub(" ", s).strip()
     return s
 
-
-from dataclasses import dataclass
-from pathlib import Path
-
-import mutagen
 
 _AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav", ".ape", ".alac", ".aif", ".aiff"}
 
@@ -142,9 +150,6 @@ def read_folder_metadata(folder: Path) -> FolderMeta | None:
         track_count=len(audio),
         source=source,
     )
-
-
-from collections import defaultdict
 
 
 @dataclass(frozen=True)
@@ -256,15 +261,6 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
         candidates=tuple(review_candidates),
     )
 
-
-import asyncio
-import json
-import logging
-import os
-import sqlite3
-from datetime import datetime
-
-logger = logging.getLogger("streamrip")
 
 _DEDUP_SCHEMA = """
 CREATE TABLE IF NOT EXISTS downloads (
@@ -425,13 +421,17 @@ def _find_album_folders(root: Path, max_depth: int = 3) -> tuple[list[Path], lis
             return
 
         has_audio = any(
-            p.is_file() and p.suffix.lower() in _AUDIO_EXTS
+            p.is_file() and not p.is_symlink() and p.suffix.lower() in _AUDIO_EXTS
             for p in children
         )
         if has_audio:
             results.append(folder)
             return
         for child in sorted(children):
+            # Skip symlinks — they can escape the configured downloads root.
+            if child.is_symlink():
+                skipped.append(str(child))
+                continue
             if child.is_dir() and not child.name.startswith("."):
                 walk(child, depth + 1)
 
@@ -457,7 +457,7 @@ async def run_scan(
     index = build_library_index(db.get_all_albums_for_index())
 
     root = Path(download_path)
-    if not root.is_dir():
+    if not root.is_dir():  # noqa: ASYNC240 — quick stat, no blocking I/O
         return {
             "status": "complete",
             "scanned": 0,

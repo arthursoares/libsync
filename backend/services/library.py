@@ -1,6 +1,7 @@
 """Library service — fetches and caches streaming library state."""
 
 import logging
+from typing import ClassVar
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
@@ -53,7 +54,7 @@ class LibraryService:
     async def _fetch_qobuz_tracks_sdk(self, client, source_album_id, album_id):
         """Fetch tracks from Qobuz using SDK client."""
         try:
-            album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
+            _album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
         except Exception:
             logger.exception("Failed to fetch Qobuz album %s via SDK", source_album_id)
             return []
@@ -375,7 +376,7 @@ class LibraryService:
             "sample_rate": float(sample_rate) if sample_rate else None,
         }
 
-    _TIDAL_QUALITY_META = {
+    _TIDAL_QUALITY_META: ClassVar[dict[str, tuple[int | None, float | None]]] = {
         "HI_RES_LOSSLESS": (24, 192.0),
         "HI_RES": (24, 96.0),
         "LOSSLESS": (16, 44.1),
