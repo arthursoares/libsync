@@ -162,8 +162,33 @@ async def start_scan(request: Request):
     ) == "True"
 
     job_id = uuid.uuid4().hex
-    app.state.scan_jobs[job_id] = {"status": "running", "result": None}
+    app.state.scan_jobs[job_id] = {
+        "status": "running",
+        "progress": {"scanned": 0, "total": 0},
+        "result": None,
+    }
     app.state.active_scan_job = job_id
+
+    # Wrap the event bus so scan_progress events also update the in-memory
+    # job registry — the polling GET endpoint reads that so the UI can show
+    # "Scanning… X / N" without subscribing to the WebSocket directly.
+    class _ProgressTrackingBus:
+        def __init__(self, inner, jobs, job_id):
+            self._inner = inner
+            self._jobs = jobs
+            self._job_id = job_id
+
+        async def publish(self, event_type, data):
+            if event_type == "scan_progress":
+                job = self._jobs.get(self._job_id)
+                if job is not None and job["status"] == "running":
+                    job["progress"] = {
+                        "scanned": data.get("scanned", 0),
+                        "total": data.get("total", 0),
+                    }
+            await self._inner.publish(event_type, data)
+
+    tracked_bus = _ProgressTrackingBus(app.state.event_bus, app.state.scan_jobs, job_id)
 
     async def runner():
         try:
@@ -171,7 +196,7 @@ async def start_scan(request: Request):
                 db,
                 download_path=download_path,
                 dedup_db_dir=_dedup_db_dir(),
-                event_bus=app.state.event_bus,
+                event_bus=tracked_bus,
                 sentinel_write_enabled=sentinel_enabled,
             )
             app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
@@ -196,7 +221,12 @@ async def scan_status(request: Request, job_id: str):
     if job is None:
         return JSONResponse({"error": "Job not found"}, status_code=404)
     if job["status"] == "running":
-        return {"status": "running"}
+        progress = job.get("progress") or {}
+        return {
+            "status": "running",
+            "scanned": progress.get("scanned", 0),
+            "total": progress.get("total", 0),
+        }
     if job["status"] == "error":
         return {"status": "error", **(job["result"] or {})}
     return {"status": "complete", **(job["result"] or {})}

@@ -170,3 +170,52 @@ class TestScanFuzzy:
         body = resp.json()
         assert body["status"] == "complete"
         assert "auto_matched" in body
+
+    async def test_running_status_includes_progress(
+        self, client, app, album_id, tmp_path, monkeypatch
+    ):
+        """Polling a running scan must return scanned / total so the UI can
+        render "Scanning… X / N" instead of sitting at 0 / ?."""
+        music = tmp_path / "music"
+        music.mkdir()
+        # Create 3 album-shaped folders so the scan has work to report on.
+        for name in ("A", "B", "C"):
+            folder = music / name
+            folder.mkdir()
+            (folder / "01.flac").touch()
+        app.state.db.set_config("downloads_path", str(music))
+
+        # Slow the scan down so we can catch it mid-run.
+        import backend.services.scan as scan_mod
+
+        original = scan_mod.run_scan
+
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(scan_mod, "run_scan", slow)
+
+        job_id = (await client.post("/api/library/scan-fuzzy")).json()["job_id"]
+        # Poll until we see a running response (should happen well before the job completes).
+        running_body = None
+        for _ in range(20):
+            resp = await client.get(f"/api/library/scan-fuzzy/{job_id}")
+            body = resp.json()
+            if body["status"] == "running":
+                running_body = body
+                break
+            await asyncio.sleep(0.01)
+
+        assert running_body is not None, "never caught the job in a running state"
+        assert "scanned" in running_body
+        assert "total" in running_body
+        assert isinstance(running_body["scanned"], int)
+        assert isinstance(running_body["total"], int)
+
+        # Drain the job so the fixture teardown doesn't leak an active task.
+        for _ in range(40):
+            resp = await client.get(f"/api/library/scan-fuzzy/{job_id}")
+            if resp.json()["status"] == "complete":
+                break
+            await asyncio.sleep(0.05)

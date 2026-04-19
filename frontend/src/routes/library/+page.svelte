@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
@@ -170,13 +170,20 @@
     }
   }
 
-  // Reload when source, sort, or filter changes
+  // Reload when source, sort, or filter changes.
+  // IMPORTANT: the reload body reads `currentPage` indirectly (via
+  // fetchAlbums building its params), which would otherwise make the
+  // effect re-run whenever Load More bumps currentPage — instantly
+  // resetting it to 1 and clobbering the just-fetched next page.
+  // Keep the reactive deps on source/sort/filter only; untrack the rest.
   $effect(() => {
-    const _s = source;
-    const _so = sort;
-    const _f = filter;
-    checkAuth();
-    fetchAlbums();
+    source;
+    sort;
+    filter;
+    untrack(() => {
+      checkAuth();
+      fetchAlbums();
+    });
   });
 
   onMount(() => {
