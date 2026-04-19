@@ -16,6 +16,7 @@ Runs as a small FastAPI + SvelteKit server in Docker (or locally) and is accesse
 - **Sync** — manual refresh or scheduled auto-sync to keep local library in step with the streaming service
 - **Custom paths** — folder/track format templates with live preview in Settings (`{albumartist}`, `{title}`, `{container}`, `{bit_depth}`, `{sampling_rate}`, etc.)
 - **Filesystem dedup** — a `.streamrip.json` sentinel file per album folder so re-scans and reset-database operations don't re-download work you already have
+- **Library scan** — fuzzy-matches pre-existing local collections against your synced library (bit-depth-aware, read-only-mount friendly) with a review UI for ambiguous cases and a manual **Mark as downloaded** button on album pages
 - **Artwork embedding** — cover art baked into tags at configurable resolution
 - **OAuth login** for Qobuz and Tidal (browser/device flows, including a headless URL-paste flow for Qobuz)
 - **Per-source dedup database** so Qobuz and Tidal track IDs never collide
@@ -55,6 +56,19 @@ If you forgot `--recursive`, you can initialize the submodule after the fact:
 git submodule update --init --recursive
 ```
 
+### Using Docker Compose
+
+Prefer compose? A ready-to-use file is at [`docker-compose.example.yml`](docker-compose.example.yml). It pulls the published image from GHCR — no clone, no local build:
+
+```bash
+curl -O https://raw.githubusercontent.com/arthursoares/libsync/main/docker-compose.example.yml
+docker compose -f docker-compose.example.yml up -d
+```
+
+Config, credentials, and the library database land in `./data` next to the compose file — back that directory up to preserve your setup. Downloaded music goes to `./music`; edit the volume mapping if you want it elsewhere.
+
+The `:latest` tag tracks stable releases. Swap to `:main` or `:dev` if you want rolling branch builds.
+
 ## Quick start — local dev
 
 ```bash
@@ -89,7 +103,7 @@ Separate targets if you want more control:
 3. **Tidal** — click **Connect Tidal** to start the device-code OAuth flow. The Settings page opens the approval URL and polls automatically until authorization completes.
 4. Set **Download Path** to `/music` (Docker) or your preferred local path.
 5. Choose your **Qobuz Quality** tier and adjust folder / track format templates if needed. The Settings page has a live preview.
-6. Optional: use **Scan Downloads** if you already have `.streamrip.json` album folders on disk and want to reconcile them into the database.
+6. Optional: use **Scan Downloads** to reconcile any existing music collection on disk with the library. Fuzzy-matches `Artist/Album/` folders by tags + bit-depth, auto-marks exact matches, and surfaces ambiguous cases for manual confirmation. For read-only mounts (NFS/SMB), turn **Write sentinel file** off before running.
 7. Click **Save**.
 8. Go to **Library** → **Refresh Library** to pull in your favorites.
 

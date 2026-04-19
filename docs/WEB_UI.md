@@ -105,15 +105,20 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 ### Settings
 
 - **Source credentials** — Qobuz (OAuth + optional `App ID` / `App Secret` overrides), Tidal (device-code OAuth)
-- **Qobuz quality** — selectable in the UI; Tidal still uses the stored backend tier/default
+- **Qobuz quality** and **Tidal quality** — both selectable in the UI (each maps onto its SDK's tier scale)
 - **Download path**
-- **Scan Downloads** — walks the download directory and reconciles `.streamrip.json` sentinel files against the DB
+- **Scan Downloads** — walks the download directory and reconciles local folders against the DB. Does two things: (a) re-ingests any `.streamrip.json` sentinels, (b) fuzzy-matches unsentineled `Artist/Album/` folders against the synced library by normalized artist+album, with bit-depth equality required for auto-match. Opens a three-section review slide-over: auto-matched (read-only), needs review (per-row Confirm), and unmatched folders (read-only paths + copy to clipboard). See [library scan spec](superpowers/specs/2026-04-18-library-scan-fuzzy-match-design.md).
+- **Write sentinel file** toggle — turn OFF when scanning a read-only mount (NFS/SMB export of an existing library). The scan still runs; sentinel writes that would fail are just skipped.
 - **Folder format** / **Track format** with live preview and sample data
 - **Source subdirectories** — nest under `Qobuz/` and `Tidal/` top-level folders
 - **Disc subdirectories** — multi-disc albums get `Disc N/` per CD
 - **Artwork embedding** + size (`thumbnail` / `small` / `large` / `original`)
 - **Auto-sync** toggle + interval
 - **Reset Database** — nukes library and history (config preserved) with a two-step confirmation
+
+### Album detail
+
+- **Mark as downloaded** / **Unmark** button — flips `download_status` without any file-system involvement. Use when you know you already have the album but the fuzzy scan can't match it (or you don't want to scan). The primitive behind this button is the same one used by the scan's Confirm action.
 
 ## Environment variables
 
@@ -151,13 +156,17 @@ All endpoints live under `/api` and return JSON. Content-Type is `application/js
 | `/api/downloads/queue/{id}` | DELETE | Cancel a single queued/running item |
 | `/api/downloads/scan` | POST | Reconcile `.streamrip.json` sentinels under `downloads_path` against the DB |
 | `/api/downloads/cancel` | POST | Cancel everything |
+| `/api/library/scan-fuzzy` | POST | Start a background scan that fuzzy-matches `Artist/Album/` folders against the synced library. Returns `{job_id}`. 409 if another scan is already running. |
+| `/api/library/scan-fuzzy/{job_id}` | GET | Job status — `{status: "running"}`, `{status: "complete", scanned, sentinel_skipped, skipped_dirs, auto_matched, review, unmatched}`, or `{status: "error", error: "..."}`. |
+| `/api/library/albums/{id}/mark-downloaded` | POST | `{"local_folder_path": "..."|null}` — flip status to complete, populate per-source dedup DB, optionally write a sentinel. `local_folder_path` must be inside the configured downloads path (400 if not). |
+| `/api/library/albums/{id}/unmark-downloaded` | POST | Reverse of mark-downloaded: clear status, remove dedup entries, delete sentinel if present. |
 | `/api/sync/status/{source}` | GET | Diff: new / removed vs local DB + last sync timestamp |
 | `/api/sync/run/{source}` | POST | Trigger a sync run (records a row in `sync_runs`) |
 | `/api/sync/history` | GET | `?source=qobuz&limit=10` — sync run history |
 | `/api/config` | GET | Current config as `AppConfig` |
 | `/api/config` | PATCH | Partial update as `ConfigUpdate`; hot-reloads clients if credentials changed |
 | `/api/config/reset` | POST | Wipe library data (albums, tracks, sync_runs). Config and credentials are preserved. Files on disk are untouched. |
-| `/api/ws` | WS | WebSocket channel — emits `download_progress`, `download_complete`, `download_failed`, `sync_started`, `sync_complete`, `library_updated`, `token_expired` |
+| `/api/ws` | WS | WebSocket channel — emits `download_progress`, `download_complete`, `download_failed`, `sync_started`, `sync_complete`, `library_updated`, `token_expired`, `scan_progress`, `scan_complete`, `album_status_changed` |
 
 ## Testing
 

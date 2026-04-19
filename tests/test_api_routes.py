@@ -62,6 +62,12 @@ class TestConfigRoutes:
         resp = await client.patch("/api/config", json={"downloads_path": "/new/path"})
         assert resp.status_code == 200
 
+    async def test_config_round_trip_includes_scan_sentinel_toggle(self, client):
+        resp = await client.patch("/api/config", json={"scan_sentinel_write_enabled": False})
+        assert resp.status_code == 200
+        got = (await client.get("/api/config")).json()
+        assert got["scan_sentinel_write_enabled"] is False
+
 
 class TestAuthRoutes:
     async def test_auth_status(self, client):

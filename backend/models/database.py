@@ -2,13 +2,14 @@
 
 import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 
 logger = logging.getLogger("streamrip")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -25,6 +26,9 @@ CREATE TABLE IF NOT EXISTS albums (
     cover_url TEXT,
     cover_path TEXT,
     quality TEXT,
+    bit_depth INTEGER,
+    sample_rate REAL,
+    local_folder_path TEXT,
     file_size_bytes INTEGER,
     download_status TEXT NOT NULL DEFAULT 'not_downloaded',
     downloaded_at TEXT,
@@ -106,6 +110,51 @@ class AppDatabase:
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (SCHEMA_VERSION,),
                 )
+                return
+
+            current = row["version"]
+            if current >= SCHEMA_VERSION:
+                return
+            if current < 2:
+                self._migrate_to_v2(conn)
+            conn.execute(
+                "UPDATE schema_version SET version = ?",
+                (SCHEMA_VERSION,),
+            )
+
+    def _migrate_to_v2(self, conn):
+        """Schema v1 → v2: add bit_depth, sample_rate, local_folder_path.
+
+        Backfills bit_depth / sample_rate best-effort by parsing the
+        existing quality string (e.g. "FLAC 24/96kHz"). Rows whose
+        quality doesn't match the pattern keep NULLs — the matcher
+        treats NULL bit_depth as "unknown" (allows matching).
+        """
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(albums)").fetchall()}
+        if "bit_depth" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN bit_depth INTEGER")
+        if "sample_rate" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN sample_rate REAL")
+        if "local_folder_path" not in existing:
+            conn.execute("ALTER TABLE albums ADD COLUMN local_folder_path TEXT")
+
+        pattern = re.compile(r"(\d+)\s*/\s*([\d.]+)\s*kHz", re.IGNORECASE)
+        rows = conn.execute(
+            "SELECT id, quality FROM albums WHERE quality IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            m = pattern.search(row["quality"] or "")
+            if not m:
+                continue
+            try:
+                bd = int(m.group(1))
+                sr = float(m.group(2))
+            except ValueError:
+                continue
+            conn.execute(
+                "UPDATE albums SET bit_depth = ?, sample_rate = ? WHERE id = ?",
+                (bd, sr, row["id"]),
+            )
 
     @contextmanager
     def _connect(self):
@@ -147,6 +196,8 @@ class AppDatabase:
         duration_seconds: int | None = None,
         cover_url: str | None = None,
         quality: str | None = None,
+        bit_depth: int | None = None,
+        sample_rate: float | None = None,
         added_to_library_at: str | None = None,
         user_id: int = 1,
     ) -> int:
@@ -155,8 +206,8 @@ class AppDatabase:
                 """INSERT INTO albums
                    (source, source_album_id, title, artist, release_date, label,
                     genre, track_count, duration_seconds, cover_url, quality,
-                    added_to_library_at, user_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bit_depth, sample_rate, added_to_library_at, user_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source, source_album_id, user_id)
                    DO UPDATE SET
                      title=excluded.title, artist=excluded.artist,
@@ -164,6 +215,8 @@ class AppDatabase:
                      genre=excluded.genre, track_count=excluded.track_count,
                      duration_seconds=excluded.duration_seconds,
                      cover_url=excluded.cover_url, quality=excluded.quality,
+                     bit_depth=COALESCE(excluded.bit_depth, albums.bit_depth),
+                     sample_rate=COALESCE(excluded.sample_rate, albums.sample_rate),
                      added_to_library_at=COALESCE(
                          excluded.added_to_library_at,
                          albums.added_to_library_at
@@ -172,7 +225,8 @@ class AppDatabase:
                 (
                     source, source_album_id, title, artist, release_date,
                     label, genre, track_count, duration_seconds, cover_url,
-                    quality, added_to_library_at, user_id,
+                    quality, bit_depth, sample_rate,
+                    added_to_library_at, user_id,
                 ),
             )
             row = conn.execute(
@@ -264,6 +318,47 @@ class AppDatabase:
                     "UPDATE albums SET download_status=? WHERE id=?",
                     (status, album_id),
                 )
+
+    def get_all_albums_for_index(self, user_id: int = 1) -> list[dict]:
+        """Return every album as a lean dict for building a match index."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT id, source, source_album_id, artist, title,
+                          bit_depth, sample_rate, track_count, download_status
+                   FROM albums WHERE user_id = ?""",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def set_album_download_state(
+        self,
+        album_id: int,
+        *,
+        downloaded_at: str,
+        local_folder_path: str | None = None,
+    ) -> None:
+        """Mark album complete, optionally recording the local folder path."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET download_status = 'complete',
+                       downloaded_at = ?,
+                       local_folder_path = COALESCE(?, local_folder_path)
+                   WHERE id = ?""",
+                (downloaded_at, local_folder_path, album_id),
+            )
+
+    def clear_album_download_state(self, album_id: int) -> None:
+        """Reverse set_album_download_state — back to not_downloaded."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET download_status = 'not_downloaded',
+                       downloaded_at = NULL,
+                       local_folder_path = NULL
+                   WHERE id = ?""",
+                (album_id,),
+            )
 
     def count_albums(self, source: str, user_id: int = 1, status: str | None = None, search: str | None = None) -> int:
         conditions = ["source = ?", "user_id = ?"]

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
+  import ScanReview from '$lib/components/ScanReview.svelte';
   import {
     isSourceAuthenticated,
   } from '$lib/auth-ui-logic.js';
@@ -15,6 +16,7 @@
   let qobuzConnected = $state(false);
 
   let tidalConnected = $state(false);
+  let tidalQuality = $state('3');
 
   let downloadPath = $state('');
   let maxConnections = $state(6);
@@ -28,6 +30,7 @@
 
   let autoSyncEnabled = $state(false);
   let syncInterval = $state('6h');
+  let scanSentinelWriteEnabled = $state(true);
 
   // Sample data for format preview
   const sampleAlbum = {
@@ -72,24 +75,43 @@
   let folderPreview = $derived(previewFormat(folderFormat, sampleAlbum));
   let trackPreview = $derived(previewFormat(trackFormat, sampleTrack) + '.flac');
 
-  let scanning = $state(false);
-  let scanResult = $state<string | null>(null);
+  let scanOpen = $state(false);
+  let scanResultState = $state<any>({ status: 'running', scanned: 0, total: 0 });
+  let scanJobId = $state<string | null>(null);
+  let scanPollTimer: ReturnType<typeof setInterval> | null = null;
+
   let confirmFlush = $state(false);
   let flushResult = $state<string | null>(null);
 
   async function scanDownloads() {
-    scanning = true;
-    scanResult = null;
+    scanOpen = true;
+    scanResultState = { status: 'running', scanned: 0, total: 0 };
     try {
-      const resp = await fetch('/api/downloads/scan', { method: 'POST' });
-      const data = await resp.json();
-      scanResult = `Found ${data.scanned} albums, synced ${data.reconciled} to database`;
-      setTimeout(() => { scanResult = null; }, 8000);
+      const { job_id } = await api.library.scanFuzzy();
+      scanJobId = job_id;
+      scanPollTimer = setInterval(async () => {
+        if (!scanJobId) return;
+        const data = await api.library.scanFuzzyStatus(scanJobId);
+        scanResultState = data;
+        if (data.status !== 'running') {
+          if (scanPollTimer) clearInterval(scanPollTimer);
+          scanPollTimer = null;
+        }
+      }, 500);
     } catch (e: any) {
-      scanResult = 'Scan failed';
-    } finally {
-      scanning = false;
+      scanResultState = { status: 'error', error: e?.message ?? 'Scan failed' };
     }
+  }
+
+  async function onScanConfirm(albumId: number, folder: string) {
+    await api.library.markDownloaded(albumId, folder);
+  }
+
+  function onScanClose() {
+    scanOpen = false;
+    if (scanPollTimer) clearInterval(scanPollTimer);
+    scanPollTimer = null;
+    scanJobId = null;
   }
 
   async function flushDatabase() {
@@ -266,6 +288,7 @@
 
   onDestroy(() => {
     if (_tidalPollTimerId !== null) clearInterval(_tidalPollTimerId);
+    if (scanPollTimer) clearInterval(scanPollTimer);
   });
 
   onMount(async () => {
@@ -290,6 +313,7 @@
         qobuzAppSecret = config.qobuz_app_secret ?? '';
         qobuzQuality = String(config.qobuz_quality ?? 3);
         qobuzDownloadBooklets = config.qobuz_download_booklets ?? true;
+        tidalQuality = String(config.tidal_quality ?? 3);
         // Check actual auth status, not just whether token exists
         try {
           const statuses = await api.auth.status();
@@ -312,6 +336,7 @@
 
         autoSyncEnabled = config.auto_sync_enabled ?? false;
         syncInterval = config.auto_sync_interval ?? '6h';
+        scanSentinelWriteEnabled = config.scan_sentinel_write_enabled ?? true;
       }
     } catch (e) {
       // Config not yet set — use defaults
@@ -330,6 +355,7 @@
         qobuz_app_secret: qobuzAppSecret,
         qobuz_quality: parseInt(qobuzQuality),
         qobuz_download_booklets: qobuzDownloadBooklets,
+        tidal_quality: parseInt(tidalQuality),
         downloads_path: downloadPath,
         max_connections: maxConnections,
         source_subdirectories: sourceSubdirectories,
@@ -340,6 +366,7 @@
         artwork_size: artworkSize,
         auto_sync_enabled: autoSyncEnabled,
         auto_sync_interval: syncInterval,
+        scan_sentinel_write_enabled: scanSentinelWriteEnabled,
       });
 
       // Refresh auth status after save (backend hot-reloads clients)
@@ -557,11 +584,23 @@
   {/if}
 
   {#if tidalError}
-    <div class="settings-row" style="border-bottom: none;">
+    <div class="settings-row">
       <div></div>
       <span style="color: var(--destructive); font-size: var(--text-xs);">{tidalError}</span>
     </div>
   {/if}
+
+  <div class="settings-row" style="border-bottom: none;">
+    <div>
+      <div class="settings-label">Quality</div>
+    </div>
+    <select class="settings-select" bind:value={tidalQuality} style="max-width: 220px;">
+      <option value="0">AAC ~96kbps</option>
+      <option value="1">AAC 320kbps</option>
+      <option value="2">16-bit / 44.1kHz FLAC</option>
+      <option value="3">24-bit / up to 192kHz FLAC</option>
+    </select>
+  </div>
 </div>
 
 <!-- ── Downloads ── -->
@@ -590,13 +629,27 @@
       <div class="settings-label-sub">Scan download folder for existing albums and sync with database</div>
     </div>
     <div style="display: flex; gap: var(--space-2); align-items: center;">
-      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanning}>
-        {#if scanning}Scanning...{:else}▸ Scan Folder{/if}
+      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanJobId !== null}>
+        {scanJobId !== null ? 'Scanning…' : '▸ Scan Folder'}
       </button>
-      {#if scanResult}
-        <span class="scan-result">{scanResult}</span>
-      {/if}
     </div>
+  </div>
+
+  <div class="settings-row">
+    <div>
+      <div class="settings-label">Write Sentinel File</div>
+      <div class="settings-label-sub">Write sentinel file in album folders — disable when scanning a read-only mount.</div>
+    </div>
+    <button
+      type="button"
+      class="toggle-track"
+      class:on={scanSentinelWriteEnabled}
+      onclick={() => scanSentinelWriteEnabled = !scanSentinelWriteEnabled}
+      aria-pressed={scanSentinelWriteEnabled}
+      aria-label="Toggle sentinel file writes"
+    >
+      <div class="toggle-thumb"></div>
+    </button>
   </div>
 
   <div class="settings-row">
@@ -762,6 +815,10 @@
     </select>
   </div>
 </div>
+
+{#if scanOpen}
+  <ScanReview result={scanResultState} onConfirm={onScanConfirm} onClose={onScanClose} />
+{/if}
 
 <style>
   /* ── Page header ── */

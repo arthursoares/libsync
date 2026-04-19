@@ -28,6 +28,8 @@ make docker        # Build + run Docker image
 - **Quality tiers are per-source.** The backend reads `qobuz_quality` or `tidal_quality` from the config DB — each maps onto the respective SDK's 0–3 scale.
 - **Auto token refresh.** The Tidal SDK refreshes on `__aenter__` and on 401 automatically. Qobuz has no equivalent refresh endpoint — credentials are re-captured via the OAuth flow in Settings.
 - **Both sources OAuth, both sources can download.** Tidal uses a device-code OAuth flow wired into Settings ("Connect Tidal" button). Qobuz uses a redirect-based OAuth flow. Tokens issued by Qobuz OAuth are bound to app `304027809`; downloads need a matching signing secret which is hardcoded in `qobuz.auth.APP_SECRET` (decoded from the official Qobuz desktop Helper bundle). Users with a manually-pasted web-player token (`798273057`) take a separate code path where the spoofer scrapes the secret from `play.qobuz.com`.
+- **Library scan is in `backend/services/scan.py`.** One module holds the normalizer, tag reader (`mutagen`), matcher, the async `run_scan` job, and the shared `mark_album_downloaded` / `unmark_album_downloaded` primitives. The primitives are the only place that (a) updates `albums.download_status`, (b) inserts into the per-source dedup DB, and (c) best-effort writes the `.streamrip.json` sentinel. Both the scan auto-confirm path AND the manual "Mark as downloaded" button on the album detail page call through these primitives.
+- **Schema v2** on `albums` adds `bit_depth`, `sample_rate`, `local_folder_path`. Sync populates the first two from `maximum_bit_depth` / `maximum_sampling_rate`; the scan populates the third. Existing v1 DBs backfill bit_depth/sample_rate by regex-parsing the legacy `quality` string on first open.
 
 ## Known Issues
 
@@ -46,5 +48,7 @@ All frontend follows `frontend/src/lib/design-system/tokens.css`:
 
 - Design spec: `docs/superpowers/specs/2026-04-06-streamrip-web-ui-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-04-06-streamrip-web-ui-plan.md`
+- Library scan spec: `docs/superpowers/specs/2026-04-18-library-scan-fuzzy-match-design.md`
+- Library scan plan: `docs/superpowers/plans/2026-04-18-library-scan-fuzzy-match-plan.md`
 - Cleanup plan: `~/.claude/plans/linear-tickling-aho.md`
 - Web UI docs: `docs/WEB_UI.md`

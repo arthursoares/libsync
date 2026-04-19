@@ -34,6 +34,17 @@ export const api = {
       request<any[]>(`/library/${source}/playlists`),
     getPlaylist: (source: string, id: number) =>
       request<any>(`/library/${source}/playlists/${id}`),
+    scanFuzzy: () =>
+      request<{ job_id: string }>('/library/scan-fuzzy', { method: 'POST' }),
+    scanFuzzyStatus: (jobId: string) =>
+      request<any>(`/library/scan-fuzzy/${jobId}`),
+    markDownloaded: (albumId: number, localFolderPath: string | null) =>
+      request<any>(`/library/albums/${albumId}/mark-downloaded`, {
+        method: 'POST',
+        body: JSON.stringify({ local_folder_path: localFolderPath }),
+      }),
+    unmarkDownloaded: (albumId: number) =>
+      request<any>(`/library/albums/${albumId}/unmark-downloaded`, { method: 'POST' }),
   },
   downloads: {
     getQueue: () => request<any>('/downloads/queue'),

@@ -1,6 +1,7 @@
 """Library service — fetches and caches streaming library state."""
 
 import logging
+from typing import ClassVar
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
@@ -53,7 +54,7 @@ class LibraryService:
     async def _fetch_qobuz_tracks_sdk(self, client, source_album_id, album_id):
         """Fetch tracks from Qobuz using SDK client."""
         try:
-            album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
+            _album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
         except Exception:
             logger.exception("Failed to fetch Qobuz album %s via SDK", source_album_id)
             return []
@@ -371,7 +372,17 @@ class LibraryService:
             "duration_seconds": album.get("duration"),
             "cover_url": image.get("large") or image.get("small"),
             "quality": quality,
+            "bit_depth": int(bit_depth) if bit_depth else None,
+            "sample_rate": float(sample_rate) if sample_rate else None,
         }
+
+    _TIDAL_QUALITY_META: ClassVar[dict[str, tuple[int | None, float | None]]] = {
+        "HI_RES_LOSSLESS": (24, 192.0),
+        "HI_RES": (24, 96.0),
+        "LOSSLESS": (16, 44.1),
+        "HIGH": (None, None),
+        "LOW": (None, None),
+    }
 
     def _extract_tidal_album(self, item):
         album = item.get("item", item) if "item" in item else item
@@ -379,11 +390,15 @@ class LibraryService:
         artist_name = ", ".join(a["name"] for a in artists) if artists else album.get("artist", {}).get("name", "Unknown")
         cover = album.get("cover", "")
         cover_url = f"https://resources.tidal.com/images/{cover.replace('-', '/')}/640x640.jpg" if cover else None
+        aq = album.get("audioQuality")
+        bit_depth, sample_rate = self._TIDAL_QUALITY_META.get(aq, (None, None))
         return {
             "source": "tidal", "source_album_id": str(album["id"]),
             "title": album.get("title", "Unknown"), "artist": artist_name,
             "release_date": album.get("releaseDate"),
             "track_count": album.get("numberOfTracks"),
             "duration_seconds": album.get("duration"),
-            "cover_url": cover_url, "quality": album.get("audioQuality"),
+            "cover_url": cover_url, "quality": aq,
+            "bit_depth": bit_depth,
+            "sample_rate": sample_rate,
         }
