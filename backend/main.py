@@ -335,23 +335,29 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.include_router(websocket.router)
     app.include_router(sync.router)
 
+    from pathlib import Path
+
     from fastapi.responses import FileResponse
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.exists(static_dir):
-        static_root = os.path.realpath(static_dir)
+        static_root = Path(static_dir).resolve()
+        index = str(static_root / "index.html")
 
         @app.get("/{path:path}")
         async def serve_frontend(path: str):
-            # os.path stat calls are trivially fast; not worth trio/anyio plumbing.
-            index = os.path.join(static_root, "index.html")
-            requested = os.path.realpath(os.path.join(static_root, path))  # noqa: ASYNC240
-            if requested != static_root and not requested.startswith(
-                static_root + os.sep
-            ):
+            # Resolve the requested path and verify it's inside static_root.
+            # Using Path.resolve().relative_to(static_root) is what CodeQL's
+            # taint tracker recognizes as a path-injection sanitizer — the
+            # previous startswith(static_root + os.sep) check was equivalent
+            # but opaque to static analysis.
+            try:
+                requested = (static_root / path).resolve()
+                requested.relative_to(static_root)
+            except (OSError, ValueError):
                 return FileResponse(index)
-            if os.path.isfile(requested):  # noqa: ASYNC240
-                return FileResponse(requested)
+            if requested.is_file():
+                return FileResponse(str(requested))
             return FileResponse(index)
 
     return app
