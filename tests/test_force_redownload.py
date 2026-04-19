@@ -25,7 +25,6 @@ from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -116,12 +115,8 @@ def _make_item(db, source: str, source_album_id: str, force: bool) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# DownloadConfig: skip_downloaded + downloads_db_path
-# ---------------------------------------------------------------------------
-
-
 class TestForceBypassesDedup:
+    """DownloadConfig: skip_downloaded + downloads_db_path."""
     async def test_force_true_disables_skip_downloaded(self, db, event_bus):
         client = MagicMock()
         client.catalog = MagicMock()

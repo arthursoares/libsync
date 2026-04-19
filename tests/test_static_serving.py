@@ -1,6 +1,6 @@
 """Tests for the SPA static-file catch-all route in backend.main."""
-import os
 import pytest
+
 from backend.main import create_app
 
 
@@ -46,7 +46,7 @@ class TestStaticFileServing:
         assert result.path == str(static_dir / "index.html")
 
     async def test_traversal_does_not_serve_files_outside_static_dir(self, app_with_static):
-        app, tmp_path, static_dir = app_with_static
+        app, _tmp_path, static_dir = app_with_static
         handler = _get_serve_frontend(app)
         secret_path = static_dir.parent / "secret.txt"
         assert secret_path.exists()

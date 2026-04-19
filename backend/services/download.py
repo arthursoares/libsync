@@ -327,7 +327,9 @@ class DownloadService:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(event_bus.publish("download_progress", {
+                    # Fire-and-forget progress emit from an SDK sync callback;
+                    # no handle needed — any error is swallowed by the except below.
+                    loop.create_task(event_bus.publish("download_progress", {  # noqa: RUF006
                         "item_id": queue_item["id"],
                         "status": "downloading",
                         "tracks_done": queue_item.get("tracks_done", 0),

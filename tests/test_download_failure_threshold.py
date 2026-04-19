@@ -23,7 +23,6 @@ from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -156,7 +155,7 @@ class TestSuccessThreshold:
 
         fake_downloader = _make_fake_downloader_returning(result)
         with patch("qobuz.AlbumDownloader", new=fake_downloader):
-            with pytest.raises(RuntimeError, match="0/10.*0%.*below 80%"):
+            with pytest.raises(RuntimeError, match=r"0/10.*0%.*below 80%"):
                 await service._download_album(item)
 
     async def test_exactly_threshold_passes(self, db, event_bus):

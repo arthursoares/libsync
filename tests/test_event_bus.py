@@ -23,8 +23,6 @@ Scenario: Publishing to an event type with no subscribers does not raise
   Then no error is raised
 """
 
-import asyncio
-import pytest
 from backend.services.event_bus import EventBus
 
 

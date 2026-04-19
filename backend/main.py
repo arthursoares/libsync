@@ -324,11 +324,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
         @app.get("/{path:path}")
         async def serve_frontend(path: str):
+            # os.path stat calls are trivially fast; not worth trio/anyio plumbing.
             index = os.path.join(static_root, "index.html")
-            requested = os.path.realpath(os.path.join(static_root, path))
+            requested = os.path.realpath(os.path.join(static_root, path))  # noqa: ASYNC240
             if requested != static_root and not requested.startswith(static_root + os.sep):
                 return FileResponse(index)
-            if os.path.isfile(requested):
+            if os.path.isfile(requested):  # noqa: ASYNC240
                 return FileResponse(requested)
             return FileResponse(index)
 
