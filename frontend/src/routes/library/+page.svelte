@@ -192,6 +192,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>Library — Libsync</title>
+</svelte:head>
+
 <div class="page-header">
   <div>
     <div class="page-title">Library</div>

@@ -388,6 +388,10 @@
   }
 </script>
 
+<svelte:head>
+  <title>Settings — Libsync</title>
+</svelte:head>
+
 <div class="page-header">
   <div>
     <div class="page-title">Settings</div>
@@ -617,7 +621,7 @@
       <input
         class="settings-input"
         type="text"
-        placeholder="/mnt/music/StreamripDownloads"
+        placeholder="/music"
         bind:value={downloadPath}
       />
     </div>

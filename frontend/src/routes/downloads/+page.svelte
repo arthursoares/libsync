@@ -50,6 +50,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>Downloads — Libsync</title>
+</svelte:head>
+
 <div class="page">
   <div class="page-header">
     <div>

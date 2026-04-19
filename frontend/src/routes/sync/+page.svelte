@@ -98,6 +98,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>Sync — Libsync</title>
+</svelte:head>
+
 <div class="page-header">
   <div>
     <div class="page-title">Sync</div>
