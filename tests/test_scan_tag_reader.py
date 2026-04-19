@@ -1,4 +1,5 @@
 """Tag/folder-name metadata extraction."""
+
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

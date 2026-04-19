@@ -1,4 +1,5 @@
 """FastAPI application for streamrip web UI."""
+
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -108,7 +109,9 @@ def _parse_auto_sync_interval(value: str | None) -> int:
         return _AUTO_SYNC_DEFAULT_SECONDS
 
 
-def _start_auto_sync_if_enabled(db: AppDatabase, sync_service: "SyncService", clients: dict) -> None:
+def _start_auto_sync_if_enabled(
+    db: AppDatabase, sync_service: "SyncService", clients: dict
+) -> None:
     """If auto_sync_enabled is True in the DB, start the loop.
 
     Picks the first connected source (qobuz or tidal) — auto-sync is
@@ -141,7 +144,8 @@ def _start_auto_sync_if_enabled(db: AppDatabase, sync_service: "SyncService", cl
 
     logger.info(
         "Starting auto-sync for %s (interval=%ds, download_new=True)",
-        source, interval_seconds,
+        source,
+        interval_seconds,
     )
     sync_service.start_auto_sync(source, interval_seconds, download_new=True)
 
@@ -187,6 +191,7 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
     try:
         from qobuz.auth import APP_ID as OAUTH_APP_ID
         from qobuz.auth import APP_SECRET as OAUTH_APP_SECRET
+
         if client_app_id == OAUTH_APP_ID and OAUTH_APP_SECRET:
             qobuz.streaming._app_secret = OAUTH_APP_SECRET
             qobuz._app_secret_cached = True
@@ -243,19 +248,33 @@ def create_app(db_path: str | None = None) -> FastAPI:
     db = AppDatabase(db_path)
     event_bus = EventBus()
 
-    for event_type in ("download_progress", "download_complete", "download_failed",
-                        "sync_started", "sync_complete", "library_updated", "token_expired"):
+    for event_type in (
+        "download_progress",
+        "download_complete",
+        "download_failed",
+        "sync_started",
+        "sync_complete",
+        "library_updated",
+        "token_expired",
+    ):
+
         async def _handler(data, et=event_type):
             await manager.broadcast(et, data)
+
         event_bus.subscribe(event_type, _handler)
 
     clients = _init_clients(db)
 
-    download_path = db.get_config("downloads_path") or os.environ.get("STREAMRIP_DOWNLOADS_PATH", "/music")
+    download_path = db.get_config("downloads_path") or os.environ.get(
+        "STREAMRIP_DOWNLOADS_PATH", "/music"
+    )
     library_service = LibraryService(db, event_bus, clients=clients)
-    download_service = DownloadService(db, event_bus, clients=clients, download_path=download_path)
+    download_service = DownloadService(
+        db, event_bus, clients=clients, download_path=download_path
+    )
     sync_service = SyncService(
-        db, event_bus,
+        db,
+        event_bus,
         clients=clients,
         library_service=library_service,
         download_service=download_service,
@@ -327,7 +346,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
             # os.path stat calls are trivially fast; not worth trio/anyio plumbing.
             index = os.path.join(static_root, "index.html")
             requested = os.path.realpath(os.path.join(static_root, path))  # noqa: ASYNC240
-            if requested != static_root and not requested.startswith(static_root + os.sep):
+            if requested != static_root and not requested.startswith(
+                static_root + os.sep
+            ):
                 return FileResponse(index)
             if os.path.isfile(requested):  # noqa: ASYNC240
                 return FileResponse(requested)

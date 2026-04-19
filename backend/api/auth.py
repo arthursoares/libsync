@@ -13,7 +13,7 @@ logger = logging.getLogger("streamrip")
 
 @router.get("/status")
 async def auth_status(request: Request):
-    clients = getattr(request.app.state, '_clients_ref', {})
+    clients = getattr(request.app.state, "_clients_ref", {})
     db = request.app.state.db
     sources = []
     for source in ("qobuz", "tidal"):
@@ -26,12 +26,14 @@ async def auth_status(request: Request):
             and client._transport._session is not None
         )
         token_key = f"{source}_token" if source == "qobuz" else f"{source}_access_token"
-        sources.append({
-            "source": source,
-            "authenticated": authenticated,
-            "user_id": db.get_config(f"{source}_user_id"),
-            "has_credentials": bool(db.get_config(token_key)),
-        })
+        sources.append(
+            {
+                "source": source,
+                "authenticated": authenticated,
+                "user_id": db.get_config(f"{source}_user_id"),
+                "has_credentials": bool(db.get_config(token_key)),
+            }
+        )
     return sources
 
 
@@ -79,6 +81,7 @@ async def qobuz_oauth_callback_redirect(request: Request, code_autorisation: str
     db.set_config("qobuz_app_id", creds["app_id"])
 
     from .config import _reload_clients
+
     await _reload_clients(request)
 
     return RedirectResponse("/settings?oauth=success")
@@ -109,6 +112,7 @@ async def qobuz_oauth_callback(request: Request, body: OAuthCodeRequest):
     db.set_config("qobuz_app_id", creds["app_id"])
 
     from .config import _reload_clients
+
     await _reload_clients(request)
 
     return {
@@ -144,6 +148,7 @@ async def qobuz_oauth_from_url(request: Request, body: OAuthRedirectRequest):
     db.set_config("qobuz_app_id", creds["app_id"])
 
     from .config import _reload_clients
+
     await _reload_clients(request)
 
     return {
@@ -171,7 +176,9 @@ async def tidal_device_code():
         logger.exception("Failed to start Tidal device-code flow")
         raise HTTPException(status_code=502, detail=str(e))
 
-    verification_url = data.get("verificationUriComplete") or data.get("verificationUri") or ""
+    verification_url = (
+        data.get("verificationUriComplete") or data.get("verificationUri") or ""
+    )
     if verification_url and not verification_url.startswith("http"):
         verification_url = f"https://{verification_url}"
 
@@ -218,6 +225,7 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
     db.set_config("tidal_token_expiry", str(data["token_expiry"]))
 
     from .config import _reload_clients
+
     await _reload_clients(request)
 
     return {"status": "authorized", "user_id": data["user_id"]}

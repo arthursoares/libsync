@@ -105,9 +105,7 @@ class TestAutoSyncLoop:
             f"expected at least 2 syncs in 50ms with a 10ms interval, got {call_count['n']}"
         )
 
-    async def test_loop_first_sync_happens_after_one_interval(
-        self, db, event_bus
-    ):
+    async def test_loop_first_sync_happens_after_one_interval(self, db, event_bus):
         """The loop sleeps BEFORE the first sync, so call_count is 0 at t=0."""
         call_count = {"n": 0}
 
@@ -267,7 +265,8 @@ class TestRunSyncDownloadNew:
         download_service.enqueue = AsyncMock(return_value=[])
 
         service = SyncService(
-            db, event_bus,
+            db,
+            event_bus,
             clients={"qobuz": client},
             library_service=library_service,
             download_service=download_service,
@@ -294,7 +293,8 @@ class TestRunSyncDownloadNew:
         download_service.enqueue = AsyncMock()
 
         service = SyncService(
-            db, event_bus,
+            db,
+            event_bus,
             clients={"qobuz": client},
             library_service=library_service,
             download_service=download_service,
@@ -312,6 +312,7 @@ class TestParseAutoSyncInterval:
 
     def test_known_presets(self):
         from backend.main import _parse_auto_sync_interval
+
         assert _parse_auto_sync_interval("1h") == 60 * 60
         assert _parse_auto_sync_interval("6h") == 6 * 60 * 60
         assert _parse_auto_sync_interval("12h") == 12 * 60 * 60
@@ -320,29 +321,31 @@ class TestParseAutoSyncInterval:
 
     def test_bare_int_string(self):
         from backend.main import _parse_auto_sync_interval
+
         assert _parse_auto_sync_interval("3600") == 3600
 
     def test_min_60_seconds(self):
         """Bare ints below 60 are clamped to 60s to avoid hammering."""
         from backend.main import _parse_auto_sync_interval
+
         assert _parse_auto_sync_interval("5") == 60
 
     def test_unknown_falls_back_to_six_hours(self):
         from backend.main import _parse_auto_sync_interval
+
         assert _parse_auto_sync_interval("custom") == 6 * 60 * 60
         assert _parse_auto_sync_interval(None) == 6 * 60 * 60
         assert _parse_auto_sync_interval("") == 6 * 60 * 60
 
     def test_case_insensitive(self):
         from backend.main import _parse_auto_sync_interval
+
         assert _parse_auto_sync_interval("DAILY") == 24 * 60 * 60
         assert _parse_auto_sync_interval("6H") == 6 * 60 * 60
 
 
 class TestLoopResilience:
-    async def test_exception_in_run_sync_does_not_kill_loop(
-        self, db, event_bus
-    ):
+    async def test_exception_in_run_sync_does_not_kill_loop(self, db, event_bus):
         """A failing sync should be logged but the loop should keep running."""
         attempts = {"n": 0}
 

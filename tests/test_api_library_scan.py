@@ -1,4 +1,5 @@
 """API tests for /scan-fuzzy, /mark-downloaded, /unmark-downloaded."""
+
 import asyncio
 
 import pytest
@@ -14,7 +15,9 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
         yield c
 
 
@@ -22,13 +25,21 @@ async def client(app):
 def album_id(app):
     db = app.state.db
     aid = db.upsert_album(
-        source="qobuz", source_album_id="42",
-        title="Abbey Road", artist="The Beatles",
-        track_count=17, bit_depth=24, sample_rate=96.0,
+        source="qobuz",
+        source_album_id="42",
+        title="Abbey Road",
+        artist="The Beatles",
+        track_count=17,
+        bit_depth=24,
+        sample_rate=96.0,
     )
-    db.upsert_track(album_id=aid, source_track_id="t1",
-                    title="Come Together", artist="The Beatles",
-                    track_number=1)
+    db.upsert_track(
+        album_id=aid,
+        source_track_id="t1",
+        title="Come Together",
+        artist="The Beatles",
+        track_number=1,
+    )
     return aid
 
 
@@ -62,7 +73,9 @@ class TestMarkDownloaded:
         resp = await client.post("/api/library/albums/99999/mark-downloaded", json={})
         assert resp.status_code == 404
 
-    async def test_rejects_path_outside_downloads_root(self, client, app, album_id, tmp_path):
+    async def test_rejects_path_outside_downloads_root(
+        self, client, app, album_id, tmp_path
+    ):
         app.state.db.set_config("downloads_path", str(tmp_path / "music"))
         (tmp_path / "music").mkdir()
         # Request a path that escapes the downloads root.
@@ -83,7 +96,9 @@ class TestMarkDownloaded:
         )
         assert resp.status_code == 400
 
-    async def test_accepts_path_inside_downloads_root(self, client, app, album_id, tmp_path):
+    async def test_accepts_path_inside_downloads_root(
+        self, client, app, album_id, tmp_path
+    ):
         downloads_root = tmp_path / "music"
         (downloads_root / "Album").mkdir(parents=True)
         app.state.db.set_config("downloads_path", str(downloads_root))

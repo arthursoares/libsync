@@ -1,4 +1,5 @@
 """Library API routes."""
+
 import asyncio
 import logging
 import os
@@ -33,7 +34,9 @@ def _resolve_downloads_root(db) -> str:
     )
 
 
-def _validate_local_folder_path(db, raw: str | None) -> tuple[str | None, JSONResponse | None]:
+def _validate_local_folder_path(
+    db, raw: str | None
+) -> tuple[str | None, JSONResponse | None]:
     """Resolve `raw` and verify it's inside the configured downloads root.
 
     Returns (resolved_path, None) on success; (None, error_response) on failure.
@@ -61,12 +64,27 @@ def _validate_local_folder_path(db, raw: str | None) -> tuple[str | None, JSONRe
 
 
 @router.get("/{source}/albums")
-async def get_albums(request: Request, source: str, page: int = 1, page_size: int = 50,
-                     sort_by: str = "added_to_library_at", sort_dir: str = "DESC",
-                     status: str | None = None, search: str | None = None):
+async def get_albums(
+    request: Request,
+    source: str,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "added_to_library_at",
+    sort_dir: str = "DESC",
+    status: str | None = None,
+    search: str | None = None,
+):
     service = request.app.state.library_service
-    return await service.get_albums(source, page=page, page_size=page_size,
-                                     sort_by=sort_by, sort_dir=sort_dir, status=status, search=search)
+    return await service.get_albums(
+        source,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        status=status,
+        search=search,
+    )
+
 
 @router.get("/{source}/albums/{album_id}")
 async def get_album_detail(request: Request, source: str, album_id: int):
@@ -76,29 +94,30 @@ async def get_album_detail(request: Request, source: str, album_id: int):
         return JSONResponse({"error": "Album not found"}, status_code=404)
     return result
 
+
 @router.post("/refresh/{source}")
 async def refresh_library(request: Request, source: str):
     service = request.app.state.library_service
     return await service.refresh_library(source)
 
+
 @router.post("/albums/{album_id}/mark-downloaded")
-async def mark_downloaded(
-    request: Request, album_id: int, body: MarkDownloadedRequest
-):
+async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedRequest):
     db = request.app.state.db
     if db.get_album(album_id) is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
     sentinel_enabled = (
-        (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
-    )
+        db.get_config("scan_sentinel_write_enabled") or "True"
+    ) == "True"
 
     resolved_path, err = _validate_local_folder_path(db, body.local_folder_path)
     if err is not None:
         return err
 
     mark_album_downloaded(
-        db, album_id,
+        db,
+        album_id,
         local_folder_path=resolved_path,
         dedup_db_dir=_dedup_db_dir(),
         sentinel_write_enabled=sentinel_enabled,
@@ -117,7 +136,9 @@ async def unmark_downloaded(request: Request, album_id: int):
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
     unmark_album_downloaded(
-        db, album_id, dedup_db_dir=_dedup_db_dir(),
+        db,
+        album_id,
+        dedup_db_dir=_dedup_db_dir(),
     )
     await request.app.state.event_bus.publish(
         "album_status_changed",
@@ -137,8 +158,8 @@ async def start_scan(request: Request):
     db = app.state.db
     download_path = _resolve_downloads_root(db)
     sentinel_enabled = (
-        (db.get_config("scan_sentinel_write_enabled") or "True") == "True"
-    )
+        db.get_config("scan_sentinel_write_enabled") or "True"
+    ) == "True"
 
     job_id = uuid.uuid4().hex
     app.state.scan_jobs[job_id] = {"status": "running", "result": None}

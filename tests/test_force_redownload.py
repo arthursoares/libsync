@@ -77,16 +77,22 @@ def _spying_downloader_class(captured: dict):
     """Build a fake AlbumDownloader class that captures the config it
     was constructed with into ``captured``."""
 
-    def _fake_class(client, config, *, on_track_start=None,
-                    on_track_progress=None, on_track_complete=None):
+    def _fake_class(
+        client,
+        config,
+        *,
+        on_track_start=None,
+        on_track_progress=None,
+        on_track_complete=None,
+    ):
         captured["config"] = config
         instance = MagicMock()
         instance.download = AsyncMock(
             return_value=FakeAlbumResult(
-                total=4, successful=4,
+                total=4,
+                successful=4,
                 tracks=[
-                    FakeTrackResult(i, f"T{i}", True, f"/x/{i}.flac")
-                    for i in range(4)
+                    FakeTrackResult(i, f"T{i}", True, f"/x/{i}.flac") for i in range(4)
                 ],
             )
         )
@@ -117,6 +123,7 @@ def _make_item(db, source: str, source_album_id: str, force: bool) -> dict:
 
 class TestForceBypassesDedup:
     """DownloadConfig: skip_downloaded + downloads_db_path."""
+
     async def test_force_true_disables_skip_downloaded(self, db, event_bus):
         client = MagicMock()
         client.catalog = MagicMock()
@@ -201,16 +208,12 @@ class TestQueueItemForceFlag:
 
     async def test_enqueue_propagates_force_flag(self, db, event_bus):
         db.upsert_album("qobuz", "abc", "T", "A")
-        service = DownloadService(
-            db, event_bus, clients={}, download_path="/tmp"
-        )
+        service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
         items = await service.enqueue("qobuz", ["abc"], force=True)
         assert items[0]["force"] is True
 
     async def test_enqueue_default_force_is_false(self, db, event_bus):
         db.upsert_album("qobuz", "abc", "T", "A")
-        service = DownloadService(
-            db, event_bus, clients={}, download_path="/tmp"
-        )
+        service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
         items = await service.enqueue("qobuz", ["abc"])  # no force kwarg
         assert items[0]["force"] is False

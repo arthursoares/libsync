@@ -170,11 +170,15 @@ class TestLibrarySDKRefresh:
         """Should paginate through all favorites."""
         page1 = MockFavoriteAlbums(
             items=[MockAlbum(id="a1", title="A1")],
-            total=2, limit=1, offset=0,
+            total=2,
+            limit=1,
+            offset=0,
         )
         page2 = MockFavoriteAlbums(
             items=[MockAlbum(id="a2", title="A2")],
-            total=2, limit=1, offset=1,
+            total=2,
+            limit=1,
+            offset=1,
         )
 
         client = MagicMock()
@@ -193,11 +197,19 @@ class TestLibrarySDKSearch:
     async def test_search_with_sdk_client(self, db, event_bus):
         """Should search using SDK client.catalog.search_albums()."""
         search_items = [
-            {"id": "s1", "title": "Found Album", "artist": {"name": "Artist"},
-             "release_date_original": "2024-01-01", "duration": 3600,
-             "tracks_count": 10, "label": {"name": "L"}, "genre": {"name": "R"},
-             "maximum_bit_depth": 24, "maximum_sampling_rate": 96.0,
-             "image": {"large": "https://img.com/c.jpg"}},
+            {
+                "id": "s1",
+                "title": "Found Album",
+                "artist": {"name": "Artist"},
+                "release_date_original": "2024-01-01",
+                "duration": 3600,
+                "tracks_count": 10,
+                "label": {"name": "L"},
+                "genre": {"name": "R"},
+                "maximum_bit_depth": 24,
+                "maximum_sampling_rate": 96.0,
+                "image": {"large": "https://img.com/c.jpg"},
+            },
         ]
         client = make_sdk_client(search_results=search_items)
         service = LibraryService(db, event_bus, clients={"qobuz": client})
@@ -215,14 +227,28 @@ class TestLibrarySDKSearch:
         db.upsert_album("qobuz", "existing", "Known", "Artist")
 
         search_items = [
-            {"id": "existing", "title": "Known", "artist": {"name": "Artist"},
-             "release_date_original": "2024-01-01", "duration": 3600,
-             "tracks_count": 10, "image": {"large": ""},
-             "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
-            {"id": "new", "title": "New", "artist": {"name": "Other"},
-             "release_date_original": "2024-06-01", "duration": 2400,
-             "tracks_count": 8, "image": {"large": ""},
-             "maximum_bit_depth": 16, "maximum_sampling_rate": 44.1},
+            {
+                "id": "existing",
+                "title": "Known",
+                "artist": {"name": "Artist"},
+                "release_date_original": "2024-01-01",
+                "duration": 3600,
+                "tracks_count": 10,
+                "image": {"large": ""},
+                "maximum_bit_depth": 16,
+                "maximum_sampling_rate": 44.1,
+            },
+            {
+                "id": "new",
+                "title": "New",
+                "artist": {"name": "Other"},
+                "release_date_original": "2024-06-01",
+                "duration": 2400,
+                "tracks_count": 8,
+                "image": {"large": ""},
+                "maximum_bit_depth": 16,
+                "maximum_sampling_rate": 44.1,
+            },
         ]
         client = make_sdk_client(search_results=search_items)
         service = LibraryService(db, event_bus, clients={"qobuz": client})

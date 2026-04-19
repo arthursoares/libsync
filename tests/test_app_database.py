@@ -97,7 +97,9 @@ class TestTracks:
     def test_update_track_status(self, db):
         album_id = db.upsert_album("qobuz", "a1", "Album", "Artist")
         track_id = db.upsert_track(album_id, "t1", "Track", "Artist")
-        db.update_track_status(track_id, "complete", "/music/track.flac", "FLAC", 24, 96000)
+        db.update_track_status(
+            track_id, "complete", "/music/track.flac", "FLAC", 24, 96000
+        )
 
         tracks = db.get_tracks(album_id)
         assert tracks[0]["download_status"] == "complete"
@@ -107,8 +109,13 @@ class TestTracks:
 class TestSyncRuns:
     def test_create_and_complete_sync_run(self, db):
         run_id = db.create_sync_run("qobuz")
-        db.complete_sync_run(run_id, albums_found=100, albums_new=5,
-                             albums_removed=1, albums_downloaded=4)
+        db.complete_sync_run(
+            run_id,
+            albums_found=100,
+            albums_new=5,
+            albums_removed=1,
+            albums_downloaded=4,
+        )
 
         history = db.get_sync_history("qobuz")
         assert len(history) == 1
