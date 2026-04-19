@@ -5,7 +5,7 @@ description = "Web UI for managing Qobuz and Tidal libraries — a FastAPI + Sve
 authors = ["Arthur Soares"]
 license = "GPL-3.0-only"
 readme = "README.md"
-repository = "https://github.com/arthursoares/streamrip"
+repository = "https://github.com/arthursoares/libsync"
 classifiers = [
   "License :: OSI Approved :: GNU General Public License (GPL)",
   "Operating System :: OS Independent",
