@@ -23,8 +23,6 @@ Scenario: Publishing to an event type with no subscribers does not raise
   Then no error is raised
 """
 
-import asyncio
-import pytest
 from backend.services.event_bus import EventBus
 
 
@@ -32,8 +30,10 @@ class TestEventBus:
     async def test_subscribe_and_publish(self):
         bus = EventBus()
         received = []
+
         async def handler(event):
             received.append(event)
+
         bus.subscribe("download_progress", handler)
         await bus.publish("download_progress", {"item_id": "1", "progress": 50})
         assert len(received) == 1
@@ -42,8 +42,13 @@ class TestEventBus:
     async def test_multiple_subscribers(self):
         bus = EventBus()
         received_a, received_b = [], []
-        async def handler_a(event): received_a.append(event)
-        async def handler_b(event): received_b.append(event)
+
+        async def handler_a(event):
+            received_a.append(event)
+
+        async def handler_b(event):
+            received_b.append(event)
+
         bus.subscribe("test_event", handler_a)
         bus.subscribe("test_event", handler_b)
         await bus.publish("test_event", {"data": "hello"})
@@ -53,7 +58,10 @@ class TestEventBus:
     async def test_unsubscribe(self):
         bus = EventBus()
         received = []
-        async def handler(event): received.append(event)
+
+        async def handler(event):
+            received.append(event)
+
         bus.subscribe("test", handler)
         bus.unsubscribe("test", handler)
         await bus.publish("test", {"data": "ignored"})

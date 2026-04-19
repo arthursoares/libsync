@@ -1,4 +1,5 @@
 """Config API routes."""
+
 import logging
 
 from fastapi import APIRouter, Request
@@ -17,9 +18,14 @@ async def get_config(request: Request) -> AppConfig:
     for key, value in raw.items():
         if key in ("qobuz_quality", "tidal_quality", "max_connections"):
             config_dict[key] = int(value)
-        elif key in ("auto_sync_enabled", "qobuz_download_booklets",
-                      "source_subdirectories", "disc_subdirectories", "embed_artwork",
-                      "scan_sentinel_write_enabled"):
+        elif key in (
+            "auto_sync_enabled",
+            "qobuz_download_booklets",
+            "source_subdirectories",
+            "disc_subdirectories",
+            "embed_artwork",
+            "scan_sentinel_write_enabled",
+        ):
             config_dict[key] = value.lower() in ("true", "1", "yes")
         else:
             config_dict[key] = value
@@ -55,7 +61,10 @@ async def update_config(request: Request, body: ConfigUpdate):
 
     # Hot-reload clients if credentials changed
     cred_keys = {
-        "qobuz_token", "qobuz_user_id", "qobuz_app_id", "qobuz_app_secret",
+        "qobuz_token",
+        "qobuz_user_id",
+        "qobuz_app_id",
+        "qobuz_app_secret",
         "tidal_access_token",
     }
     if cred_keys & set(updates.keys()):
@@ -65,11 +74,10 @@ async def update_config(request: Request, body: ConfigUpdate):
     auto_sync_keys = {"auto_sync_enabled", "auto_sync_interval"}
     if auto_sync_keys & set(updates.keys()):
         from ..main import _start_auto_sync_if_enabled
+
         sync_service = request.app.state.sync_service
         sync_service.stop_auto_sync()
-        _start_auto_sync_if_enabled(
-            db, sync_service, request.app.state._clients_ref
-        )
+        _start_auto_sync_if_enabled(db, sync_service, request.app.state._clients_ref)
 
     return await get_config(request)
 
@@ -83,7 +91,9 @@ async def reset_database(request: Request):
         conn.execute("DELETE FROM tracks")
         conn.execute("DELETE FROM sync_runs")
     logger.info("Database reset — library data cleared, config preserved")
-    return {"message": "Library, tracks, and sync history cleared. Config and credentials preserved. Files on disk unchanged."}
+    return {
+        "message": "Library, tracks, and sync history cleared. Config and credentials preserved. Files on disk unchanged."
+    }
 
 
 async def _reload_clients(request: Request):
@@ -93,7 +103,7 @@ async def _reload_clients(request: Request):
     db = request.app.state.db
 
     # Close existing sessions (all clients are SDK async context managers now).
-    old_clients = getattr(request.app.state, '_clients_ref', {})
+    old_clients = getattr(request.app.state, "_clients_ref", {})
     for client in old_clients.values():
         try:
             await client.__aexit__(None, None, None)
@@ -115,6 +125,7 @@ async def _reload_clients(request: Request):
     qobuz = clients.get("qobuz")
     if qobuz:
         from ..main import _resolve_qobuz_credentials
+
         await _resolve_qobuz_credentials(db, qobuz)
 
     # Update all service references
@@ -129,6 +140,5 @@ async def _reload_clients(request: Request):
     # empty.  Without this re-check the loop would never start until the
     # user toggled the setting again or restarted the app.
     from ..main import _start_auto_sync_if_enabled
-    _start_auto_sync_if_enabled(
-        db, request.app.state.sync_service, clients
-    )
+
+    _start_auto_sync_if_enabled(db, request.app.state.sync_service, clients)

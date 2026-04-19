@@ -23,7 +23,6 @@ from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -64,6 +63,7 @@ class FakeAlbumResult:
     The service touches: total, successful, success_rate, tracks, title,
     artist.  AlbumDownloader returns a real dataclass; we fake it.
     """
+
     total: int
     successful: int
     title: str = "Test Album"
@@ -84,8 +84,14 @@ def _make_fake_downloader_returning(result: FakeAlbumResult):
     object whose async ``download(album_id)`` resolves to ``result``.
     """
 
-    def _fake_class(client, config, *, on_track_start=None,
-                    on_track_progress=None, on_track_complete=None):
+    def _fake_class(
+        client,
+        config,
+        *,
+        on_track_start=None,
+        on_track_progress=None,
+        on_track_complete=None,
+    ):
         instance = MagicMock()
         instance.download = AsyncMock(return_value=result)
         return instance
@@ -112,7 +118,9 @@ def _seed_album(db, source: str, source_album_id: str) -> int:
     return db_id
 
 
-def _make_queue_item(db, source: str, source_album_id: str, force: bool = False) -> dict:
+def _make_queue_item(
+    db, source: str, source_album_id: str, force: bool = False
+) -> dict:
     db_id = _seed_album(db, source, source_album_id)
     return {
         "id": "queue-id-1",
@@ -156,7 +164,7 @@ class TestSuccessThreshold:
 
         fake_downloader = _make_fake_downloader_returning(result)
         with patch("qobuz.AlbumDownloader", new=fake_downloader):
-            with pytest.raises(RuntimeError, match="0/10.*0%.*below 80%"):
+            with pytest.raises(RuntimeError, match=r"0/10.*0%.*below 80%"):
                 await service._download_album(item)
 
     async def test_exactly_threshold_passes(self, db, event_bus):
@@ -201,9 +209,7 @@ class TestSuccessThreshold:
             with pytest.raises(RuntimeError, match="below 80%"):
                 await service._download_album(item)
 
-    async def test_one_failed_track_in_otherwise_full_album_passes(
-        self, db, event_bus
-    ):
+    async def test_one_failed_track_in_otherwise_full_album_passes(self, db, event_bus):
         """9/10 = 90% should NOT raise — a single bad track is tolerable."""
         result = FakeAlbumResult(
             total=10,
@@ -274,13 +280,12 @@ def _build_queue_item_in_place(service, db, source: str, source_album_id: str):
 
 
 class TestProcessQueueHandlesFailure:
-    async def test_failed_download_marks_queue_item_failed(
-        self, db, event_bus
-    ):
+    async def test_failed_download_marks_queue_item_failed(self, db, event_bus):
         """When _download_album raises, _process_queue must mark the item
         as failed and revert the album DB row to not_downloaded."""
         result = FakeAlbumResult(
-            total=10, successful=2,
+            total=10,
+            successful=2,
             tracks=[
                 FakeTrackResult(track_id=i, title=f"T{i}", success=(i < 2))
                 for i in range(10)
@@ -307,15 +312,16 @@ class TestProcessQueueHandlesFailure:
         album_after = db.get_album(db_id)
         assert album_after["download_status"] == "not_downloaded"
 
-    async def test_successful_download_marks_queue_item_complete(
-        self, db, event_bus
-    ):
+    async def test_successful_download_marks_queue_item_complete(self, db, event_bus):
         """A 100% successful download must mark the queue item complete
         and the album row complete."""
         result = FakeAlbumResult(
-            total=4, successful=4,
+            total=4,
+            successful=4,
             tracks=[
-                FakeTrackResult(track_id=i, title=f"T{i}", success=True, path=f"/x/{i}.flac")
+                FakeTrackResult(
+                    track_id=i, title=f"T{i}", success=True, path=f"/x/{i}.flac"
+                )
                 for i in range(4)
             ],
         )

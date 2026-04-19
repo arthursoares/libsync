@@ -1,7 +1,10 @@
 """Tests for API routes."""
+
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
-from unittest.mock import AsyncMock, patch
+
 from backend.main import create_app
 
 
@@ -12,7 +15,9 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
         yield c
 
 
@@ -48,7 +53,9 @@ class TestDownloadRoutes:
 
     async def test_enqueue_download(self, client, app):
         app.state.db.upsert_album("qobuz", "a1", "Test", "Artist")
-        resp = await client.post("/api/downloads/queue", json={"source": "qobuz", "album_ids": ["a1"]})
+        resp = await client.post(
+            "/api/downloads/queue", json={"source": "qobuz", "album_ids": ["a1"]}
+        )
         assert resp.status_code == 200
         assert len(resp.json()) == 1
 
@@ -63,7 +70,9 @@ class TestConfigRoutes:
         assert resp.status_code == 200
 
     async def test_config_round_trip_includes_scan_sentinel_toggle(self, client):
-        resp = await client.patch("/api/config", json={"scan_sentinel_write_enabled": False})
+        resp = await client.patch(
+            "/api/config", json={"scan_sentinel_write_enabled": False}
+        )
         assert resp.status_code == 200
         got = (await client.get("/api/config")).json()
         assert got["scan_sentinel_write_enabled"] is False
@@ -103,9 +112,12 @@ class TestAuthOAuthRoutes:
         assert "qobuz.com" in data["url"]
 
     async def test_oauth_from_url_returns_400_on_exchange_failure(self, client):
-        with patch("qobuz.auth.extract_code_from_url", return_value="code"), patch(
-            "qobuz.auth.exchange_code",
-            new=AsyncMock(side_effect=RuntimeError("bad code")),
+        with (
+            patch("qobuz.auth.extract_code_from_url", return_value="code"),
+            patch(
+                "qobuz.auth.exchange_code",
+                new=AsyncMock(side_effect=RuntimeError("bad code")),
+            ),
         ):
             resp = await client.post(
                 "/api/auth/qobuz/oauth-from-url",

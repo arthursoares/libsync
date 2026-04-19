@@ -1,4 +1,5 @@
 """End-to-end scan job over a synthetic music folder."""
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,12 +18,24 @@ def _touch(path: Path, content: str = "") -> None:
 def library(tmp_path):
     db = AppDatabase(str(tmp_path / "libsync.db"))
     # Two library albums — one will auto-match, one will be ambiguous.
-    db.upsert_album(source="qobuz", source_album_id="1",
-                    title="Abbey Road", artist="The Beatles",
-                    track_count=17, bit_depth=24, sample_rate=96.0)
-    db.upsert_album(source="qobuz", source_album_id="2",
-                    title="Revolver", artist="The Beatles",
-                    track_count=14, bit_depth=24, sample_rate=96.0)
+    db.upsert_album(
+        source="qobuz",
+        source_album_id="1",
+        title="Abbey Road",
+        artist="The Beatles",
+        track_count=17,
+        bit_depth=24,
+        sample_rate=96.0,
+    )
+    db.upsert_album(
+        source="qobuz",
+        source_album_id="2",
+        title="Revolver",
+        artist="The Beatles",
+        track_count=14,
+        bit_depth=24,
+        sample_rate=96.0,
+    )
     return db
 
 
@@ -54,11 +67,18 @@ async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
     _touch(music / "The Beatles - Revolver" / "01.flac")
     _touch(music / "Unknown Band - Whatever" / "01.flac")
 
-    _patch_mutagen(monkeypatch, {
-        "Abbey Road": {"albumartist": "The Beatles", "album": "Abbey Road", "_bd": 24},
-        "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 16},
-        "Whatever": {"albumartist": "Unknown Band", "album": "Whatever"},
-    })
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            },
+            "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 16},
+            "Whatever": {"albumartist": "Unknown Band", "album": "Whatever"},
+        },
+    )
 
     event_bus = AsyncMock()
 
@@ -74,16 +94,14 @@ async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
     assert 1 in titles_auto  # Abbey Road 24-bit both sides
 
     # Revolver: local 16-bit, library 24-bit → review
-    review_ids = {c["album_id"]
-                  for r in result["review"] for c in r["candidates"]}
+    review_ids = {c["album_id"] for r in result["review"] for c in r["candidates"]}
     assert 2 in review_ids
 
     # Whatever: no library match
     assert any("Whatever" in u for u in result["unmatched"])
 
     # Progress events were emitted.
-    event_bus.publish.assert_any_call("scan_progress",
-                                      {"scanned": 3, "total": 3})
+    event_bus.publish.assert_any_call("scan_progress", {"scanned": 3, "total": 3})
 
 
 @pytest.mark.asyncio
@@ -118,16 +136,26 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
     _touch(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]" / "01.flac")
     _touch(music / "_tuning" / "TestSignal.wav")  # no artist folder above
 
-    _patch_mutagen(monkeypatch, {
-        "Abbey Road": {"albumartist": "The Beatles", "album": "Abbey Road", "_bd": 24},
-        "Revolver":   {"albumartist": "The Beatles", "album": "Revolver",   "_bd": 24},
-        "TestSignal": {"albumartist": "Test", "album": "Tuning"},
-    })
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            },
+            "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 24},
+            "TestSignal": {"albumartist": "Test", "album": "Tuning"},
+        },
+    )
     event_bus = AsyncMock()
 
     result = await run_scan(
-        library, download_path=str(music), dedup_db_dir=str(tmp_path),
-        event_bus=event_bus, sentinel_write_enabled=False,
+        library,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=event_bus,
+        sentinel_write_enabled=False,
     )
 
     # Two library matches land in auto_matched; _tuning is unmatched.
@@ -154,6 +182,7 @@ def test_find_album_folders_skips_unreadable_dirs(tmp_path):
 
     if os.geteuid() == 0:
         import pytest
+
         bad.chmod(0o755)
         pytest.skip("cannot test permissions as root")
 

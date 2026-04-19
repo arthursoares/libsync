@@ -3,6 +3,7 @@
 See docs/superpowers/specs/2026-04-18-library-scan-fuzzy-match-design.md
 for the design rationale.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -52,12 +53,24 @@ def normalize(value: str | None) -> str:
     return s
 
 
-_AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav", ".ape", ".alac", ".aif", ".aiff"}
+_AUDIO_EXTS = {
+    ".flac",
+    ".mp3",
+    ".m4a",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".ape",
+    ".alac",
+    ".aif",
+    ".aiff",
+}
 
 
 @dataclass(frozen=True)
 class FolderMeta:
     """Metadata extracted from an album folder."""
+
     folder: Path
     artist: str
     album: str
@@ -68,8 +81,9 @@ class FolderMeta:
 
 
 def _audio_files(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir()
-                  if p.is_file() and p.suffix.lower() in _AUDIO_EXTS)
+    return sorted(
+        p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _AUDIO_EXTS
+    )
 
 
 def _tag_value(tags, key: str) -> str | None:
@@ -165,6 +179,7 @@ class Candidate:
 @dataclass(frozen=True)
 class MatchResult:
     """Result of classifying one folder against the library."""
+
     kind: str  # "auto_match" | "review" | "unmatched"
     album_id: int | None = None  # set when kind == "auto_match"
     reason: str = ""
@@ -179,6 +194,7 @@ class LibraryIndex:
     `by_album_only` maps norm_album → list of album rows (fallback when
     the folder has no reliable artist).
     """
+
     by_full_key: dict[tuple[str, str], list[dict]]
     by_album_only: dict[str, list[dict]]
 
@@ -247,14 +263,16 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
             reasons.append("multiple_candidates")
         if not reasons:
             reasons.append("ambiguous")
-        review_candidates.append(Candidate(
-            album_id=album["id"],
-            source=album["source"],
-            artist=album["artist"],
-            title=album["title"],
-            score=0.9 if norm_artist else 0.6,
-            reason="; ".join(reasons),
-        ))
+        review_candidates.append(
+            Candidate(
+                album_id=album["id"],
+                source=album["source"],
+                artist=album["artist"],
+                title=album["title"],
+                score=0.9 if norm_artist else 0.6,
+                reason="; ".join(reasons),
+            )
+        )
 
     return MatchResult(
         kind="review",
@@ -492,30 +510,38 @@ async def run_scan(
         if result.kind == "auto_match":
             await asyncio.to_thread(
                 mark_album_downloaded,
-                db, result.album_id,
+                db,
+                result.album_id,
                 local_folder_path=str(folder),
                 dedup_db_dir=dedup_db_dir,
                 sentinel_write_enabled=sentinel_write_enabled,
             )
-            auto_matched.append({
-                "album_id": result.album_id,
-                "folder": str(folder),
-                "reason": result.reason,
-            })
+            auto_matched.append(
+                {
+                    "album_id": result.album_id,
+                    "folder": str(folder),
+                    "reason": result.reason,
+                }
+            )
         elif result.kind == "review":
-            review.append({
-                "folder": str(folder),
-                "local_bit_depth": meta.bit_depth,
-                "local_sample_rate": meta.sample_rate,
-                "candidates": [
-                    {
-                        "album_id": c.album_id, "source": c.source,
-                        "artist": c.artist, "title": c.title,
-                        "score": c.score, "reason": c.reason,
-                    }
-                    for c in result.candidates
-                ],
-            })
+            review.append(
+                {
+                    "folder": str(folder),
+                    "local_bit_depth": meta.bit_depth,
+                    "local_sample_rate": meta.sample_rate,
+                    "candidates": [
+                        {
+                            "album_id": c.album_id,
+                            "source": c.source,
+                            "artist": c.artist,
+                            "title": c.title,
+                            "score": c.score,
+                            "reason": c.reason,
+                        }
+                        for c in result.candidates
+                    ],
+                }
+            )
         else:
             unmatched.append(str(folder))
 
