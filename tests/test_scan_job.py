@@ -1,6 +1,6 @@
 """End-to-end scan job over a synthetic music folder."""
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -170,6 +170,7 @@ def test_find_album_folders_skips_unreadable_dirs(tmp_path):
 def test_find_album_folders_skips_symlinks(tmp_path):
     """Symlinked directories must not be recursed into — they can escape the root."""
     import os
+
     from backend.services.scan import _find_album_folders
 
     inside = tmp_path / "inside" / "album"

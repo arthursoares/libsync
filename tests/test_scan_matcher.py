@@ -4,8 +4,8 @@ from pathlib import Path
 from backend.services.scan import (
     FolderMeta,
     LibraryIndex,
-    classify,
     build_library_index,
+    classify,
 )
 
 

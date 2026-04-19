@@ -1,8 +1,8 @@
 """Tag/folder-name metadata extraction."""
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from backend.services.scan import read_folder_metadata, FolderMeta
+from backend.services.scan import FolderMeta, read_folder_metadata
 
 
 def _make_folder(tmp_path: Path, name: str, files: list[str]) -> Path:

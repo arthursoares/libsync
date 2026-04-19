@@ -1,7 +1,7 @@
 """Schema v1 → v2 migration for the albums table."""
 import sqlite3
 
-from backend.models.database import AppDatabase, SCHEMA_VERSION
+from backend.models.database import SCHEMA_VERSION, AppDatabase
 
 
 def test_v2_adds_expected_columns(tmp_path):
