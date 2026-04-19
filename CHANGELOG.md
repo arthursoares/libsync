@@ -2,6 +2,23 @@
 
 All notable changes to Libsync are documented in this file. Release tags are annotated git tags; each section below mirrors the tag message for easy GitHub browsing.
 
+## v0.0.4 — 2026-04-19
+
+Bugfix release on top of v0.0.3. Four issues found while testing the fuzzy-scan against a real 1,800-album library.
+
+### Fixed
+
+- **Scan panel stuck at `0 / ?`** — `GET /api/library/scan-fuzzy/{job_id}` now includes live `scanned` / `total` progress while the job is running. The scan's `event_bus.publish("scan_progress", …)` events already drove the WebSocket channel, but the REST polling endpoint was returning `{"status": "running"}` with no progress fields; the UI renders `{scanned ?? 0} / {total ?? '?'}` and sat at `0 / ?` for the whole scan. The POST handler now wraps the event bus so progress events also update the in-memory job registry.
+- **Scan Review panel had no background** — `ScanReview.svelte` referenced CSS tokens that don't exist in `design-system/tokens.css` (`--surface`, `--fg`, `--muted`, `--shadow-color`); browsers resolved the unknown `var()`s to empty and the panel blended into the page. Rewired to the real tokens (`--canvas-raised`, `--text-primary`, `--text-secondary`, `--shadow-lg`) and added a `--border` left edge.
+- **Library grid didn't refresh on Mark / Unmark** — the manual button and fuzzy-scan auto-matches flipped status in the DB and published `album_status_changed` over WebSocket, but nobody was listening in the frontend library store. Now patched in place so grid pills and the open detail panel update live.
+- **Load More instantly overwritten by a page-1 refetch** — the library page's reload-on-filter `$effect` called `fetchAlbums()`, which read `currentPage` while building params. Svelte 5 `$effect` tracks reactive reads transitively, so `currentPage` became a dependency of the effect; bumping it via Load More re-triggered the effect, reset `currentPage` to 1, and overwrote page 2 with page 1. Fixed by wrapping the effect body in `untrack()` so only `source` / `sort` / `filter` count as dependencies.
+
+### Commits since v0.0.3
+
+https://github.com/arthursoares/libsync/compare/v0.0.3...v0.0.4
+
+---
+
 ## v0.0.3 — 2026-04-19
 
 ### Features
