@@ -391,7 +391,9 @@ class LibraryService:
             "albums": enriched,
             "total": total,
             "limit": getattr(result, "limit", None) or limit,
-            "offset": getattr(result, "offset", None) if getattr(result, "offset", None) is not None else offset,
+            "offset": getattr(result, "offset", None)
+            if getattr(result, "offset", None) is not None
+            else offset,
         }
 
     def _extract_album_data(self, source, item):
