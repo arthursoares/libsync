@@ -48,10 +48,29 @@ export const api = {
   },
   downloads: {
     getQueue: () => request<any>('/downloads/queue'),
-    enqueue: (source: string, albumIds: string[]) =>
+    enqueue: (
+      source: string,
+      albumIds: string[],
+      options?: {
+        force?: boolean;
+        albums?: Array<{
+          source_album_id: string;
+          title: string;
+          artist: string;
+          cover_url?: string | null;
+          track_count?: number | null;
+          release_date?: string | null;
+        }>;
+      },
+    ) =>
       request<any>('/downloads/queue', {
         method: 'POST',
-        body: JSON.stringify({ source, album_ids: albumIds }),
+        body: JSON.stringify({
+          source,
+          album_ids: albumIds,
+          force: options?.force ?? false,
+          albums: options?.albums,
+        }),
       }),
     cancel: (itemId: string) =>
       request<any>(`/downloads/queue/${itemId}`, { method: 'DELETE' }),

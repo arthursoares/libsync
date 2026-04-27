@@ -80,14 +80,41 @@ class TestDownloadQueue:
         queue = service.get_queue()
         assert all(q["status"] == "cancelled" for q in queue)
 
-    async def test_enqueue_auto_creates_unknown_album(self, db, event_bus):
-        """Should auto-create a DB entry for albums not in the library (search results)."""
+    async def test_enqueue_auto_creates_unknown_album_from_supplied_metadata(
+        self, db, event_bus
+    ):
+        """Search results carry their metadata in `supplied_metadata` so the
+        backend doesn't have to round-trip to the streaming service."""
         service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
-        items = await service.enqueue("qobuz", ["new-search-result"])
+        supplied = {
+            "new-search-result": {
+                "source_album_id": "new-search-result",
+                "title": "Brand New Album",
+                "artist": "Brand New Artist",
+                "cover_url": "https://example/cover.jpg",
+                "track_count": 12,
+                "release_date": "2026-01-01",
+            }
+        }
+        items = await service.enqueue(
+            "qobuz", ["new-search-result"], supplied_metadata=supplied
+        )
         assert len(items) == 1
         assert items[0]["source_album_id"] == "new-search-result"
         album = db.get_album_by_source_id("qobuz", "new-search-result")
         assert album is not None
+        assert album["title"] == "Brand New Album"
+        assert album["artist"] == "Brand New Artist"
+
+    async def test_enqueue_unknown_album_without_metadata_or_client_raises(
+        self, db, event_bus
+    ):
+        """No supplied metadata + no client = loud failure. The previous
+        silent-fallback wrote 'Album {id}' to the DB, masking real auth /
+        network failures."""
+        service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
+        with pytest.raises(ValueError, match="No client configured"):
+            await service.enqueue("qobuz", ["new-search-result"])
 
     async def test_force_flag_preserved(self, db, event_bus):
         db.upsert_album("qobuz", "a1", "Album", "Artist")

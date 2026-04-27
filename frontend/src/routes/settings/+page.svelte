@@ -286,6 +286,76 @@
     tidalUserCode = '';
   }
 
+  // Tidal PKCE OAuth state (HiRes-capable client). Distinct from the
+  // device-code flow because PKCE requires a redirect URL the user pastes
+  // back, and only this flow's tokens unlock LOSSLESS / HI_RES tiers.
+  let tidalPkceStep = $state<'idle' | 'awaiting_paste' | 'exchanging' | 'authorized' | 'error'>('idle');
+  let tidalPkceHandle = $state('');
+  let tidalPkceAuthUrl = $state('');
+  let tidalPkceRedirectUri = $state('');
+  let tidalPkceRedirectInput = $state('');
+  let tidalPkceError = $state('');
+
+  async function startTidalPkce() {
+    tidalPkceStep = 'idle';
+    tidalPkceError = '';
+    try {
+      const resp = await fetch('/api/auth/tidal/pkce-start', { method: 'POST' });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      tidalPkceHandle = data.handle;
+      tidalPkceAuthUrl = data.auth_url;
+      tidalPkceRedirectUri = data.redirect_uri_prefix;
+      tidalPkceStep = 'awaiting_paste';
+      window.open(tidalPkceAuthUrl, '_blank');
+    } catch (e: any) {
+      tidalPkceError = e?.message ?? 'Failed to start Tidal HiRes login';
+      tidalPkceStep = 'error';
+    }
+  }
+
+  async function submitTidalPkceUrl() {
+    if (!tidalPkceRedirectInput.trim() || !tidalPkceHandle) return;
+    tidalPkceStep = 'exchanging';
+    tidalPkceError = '';
+    try {
+      const resp = await fetch('/api/auth/tidal/pkce-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          handle: tidalPkceHandle,
+          redirect_url: tidalPkceRedirectInput.trim(),
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.detail || `HTTP ${resp.status}`);
+      }
+      if (data.status !== 'authorized') {
+        throw new Error(data.error || 'Authorization failed');
+      }
+      tidalConnected = true;
+      tidalPkceStep = 'authorized';
+      tidalPkceHandle = '';
+      tidalPkceAuthUrl = '';
+      tidalPkceRedirectInput = '';
+    } catch (e: any) {
+      tidalPkceError = e?.message ?? 'Failed to exchange code';
+      tidalPkceStep = 'error';
+    }
+  }
+
+  function cancelTidalPkce() {
+    tidalPkceStep = 'idle';
+    tidalPkceHandle = '';
+    tidalPkceAuthUrl = '';
+    tidalPkceRedirectInput = '';
+    tidalPkceError = '';
+  }
+
   onDestroy(() => {
     if (_tidalPollTimerId !== null) clearInterval(_tidalPollTimerId);
     if (scanPollTimer) clearInterval(scanPollTimer);
@@ -319,6 +389,11 @@
           const statuses = await api.auth.status();
           qobuzConnected = isSourceAuthenticated(statuses, 'qobuz');
           tidalConnected = isSourceAuthenticated(statuses, 'tidal');
+          // If a Tidal token exists and was issued via PKCE, surface that
+          // so the HiRes button shows "Connected" instead of inviting another login.
+          if (tidalConnected && config.tidal_auth_method === 'pkce') {
+            tidalPkceStep = 'authorized';
+          }
         } catch {
           qobuzConnected = !!config.qobuz_token;
           tidalConnected = !!config.tidal_access_token;
@@ -562,11 +637,55 @@
 
   <div class="settings-row">
     <div>
-      <div class="settings-label">Login with Tidal</div>
-      <div class="settings-label-sub">Opens a Tidal authorization page in your browser — works on any device</div>
+      <div class="settings-label">Login with Tidal (HiRes)</div>
+      <div class="settings-label-sub">Required for Lossless / HiRes / Atmos. After approval, copy the URL from the address bar and paste below.</div>
+    </div>
+    {#if tidalPkceStep === 'authorized'}
+      <span style="color: var(--success, #4caf50); font-size: var(--text-sm);">Connected ↻</span>
+      <button class="btn btn-secondary btn-sm" onclick={startTidalPkce} style="margin-left: var(--space-2);">Re-auth</button>
+    {:else if tidalPkceStep === 'idle' || tidalPkceStep === 'error'}
+      <button class="btn btn-primary btn-sm" onclick={startTidalPkce}>▸ Connect Tidal (HiRes)</button>
+    {:else}
+      <button class="btn btn-secondary btn-sm" onclick={cancelTidalPkce}>Cancel</button>
+    {/if}
+  </div>
+
+  {#if tidalPkceStep === 'awaiting_paste' || tidalPkceStep === 'exchanging'}
+    <div class="settings-row">
+      <div>
+        <div class="settings-label">Paste the redirect URL</div>
+        <div class="settings-label-sub">After signing in, the browser lands on a Tidal "404"-style page starting with <code>{tidalPkceRedirectUri}</code>. Copy the full URL from the address bar and paste it here.</div>
+      </div>
+      <div style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+        <input
+          class="settings-input"
+          type="text"
+          placeholder="{tidalPkceRedirectUri}?code=..."
+          bind:value={tidalPkceRedirectInput}
+          style="min-width: 320px; max-width: 500px;"
+        />
+        <button class="btn btn-primary btn-sm" onclick={submitTidalPkceUrl} disabled={tidalPkceStep === 'exchanging' || !tidalPkceRedirectInput.trim()}>
+          {#if tidalPkceStep === 'exchanging'}Exchanging...{:else}Submit{/if}
+        </button>
+        <a href={tidalPkceAuthUrl} target="_blank" rel="noopener" style="font-size: var(--text-xs); color: var(--muted);">Open link manually ↗</a>
+      </div>
+    </div>
+  {/if}
+
+  {#if tidalPkceError}
+    <div class="settings-row">
+      <div></div>
+      <span style="color: var(--destructive); font-size: var(--text-xs);">{tidalPkceError}</span>
+    </div>
+  {/if}
+
+  <div class="settings-row">
+    <div>
+      <div class="settings-label">Login with Tidal (legacy, AAC only)</div>
+      <div class="settings-label-sub">Headless device-code flow — works on any device but capped at 320kbps AAC regardless of subscription.</div>
     </div>
     {#if tidalOauthStep === 'idle' || tidalOauthStep === 'error'}
-      <button class="btn btn-secondary btn-sm" onclick={startTidalOAuth}>▸ Connect Tidal</button>
+      <button class="btn btn-secondary btn-sm" onclick={startTidalOAuth}>▸ Connect Tidal (AAC)</button>
     {:else if tidalOauthStep === 'waiting'}
       <button class="btn btn-secondary btn-sm" onclick={cancelTidalOAuth}>Cancel</button>
     {:else if tidalOauthStep === 'authorized'}
@@ -601,8 +720,9 @@
     <select class="settings-select" bind:value={tidalQuality} style="max-width: 220px;">
       <option value="0">AAC ~96kbps</option>
       <option value="1">AAC 320kbps</option>
-      <option value="2">16-bit / 44.1kHz FLAC</option>
-      <option value="3">24-bit / up to 192kHz FLAC</option>
+      <option value="2">16-bit / 44.1kHz FLAC (CD lossless)</option>
+      <option value="3">MQA / FLAC (legacy HiRes)</option>
+      <option value="4">HiRes Lossless (24-bit, up to 192kHz) — coming soon</option>
     </select>
   </div>
 </div>

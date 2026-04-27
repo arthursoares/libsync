@@ -51,7 +51,20 @@
     if (selectedAlbums.size === 0) return;
     batchDownloading = true;
     try {
-      await api.downloads.enqueue(source, [...selectedAlbums]);
+      // Search results already carry the full metadata — pass it through
+      // so the backend doesn't have to re-fetch (and risk falling back to
+      // "Album <id>" when the round-trip fails).
+      const albums = results
+        .filter((r: any) => selectedAlbums.has(r.source_album_id))
+        .map((r: any) => ({
+          source_album_id: r.source_album_id,
+          title: r.title,
+          artist: r.artist,
+          cover_url: r.cover_url ?? null,
+          track_count: r.track_count ?? null,
+          release_date: r.release_date ?? null,
+        }));
+      await api.downloads.enqueue(source, [...selectedAlbums], { albums });
       selectedAlbums = new Set();
       selectMode = false;
     } finally {

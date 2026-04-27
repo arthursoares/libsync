@@ -12,6 +12,8 @@
     id: string;
     title: string;
     artist: string;
+    source?: string;
+    source_album_id?: string;
     track_count?: number;
     tracks_done?: number;
     cover_url?: string;
@@ -22,6 +24,8 @@
     current_track?: string;
     track_statuses?: TrackStatus[];
   }
+
+  let retrying = $state<Set<string>>(new Set());
 
   let expandedItems = $state<Set<string>>(new Set());
 
@@ -39,6 +43,24 @@
       await api.downloads.cancel(id);
     } catch (e) {
       console.error('Failed to cancel download', e);
+    }
+  }
+
+  async function retryItem(item: QueueItem) {
+    if (!item.source || !item.source_album_id) return;
+    const next = new Set(retrying);
+    next.add(item.id);
+    retrying = next;
+    try {
+      // force=true bypasses the per-source dedup DB so partially-downloaded
+      // tracks get re-fetched instead of being skip-marked as "already done".
+      await api.downloads.enqueue(item.source, [item.source_album_id], { force: true });
+    } catch (e) {
+      console.error('Failed to retry download', e);
+    } finally {
+      const after = new Set(retrying);
+      after.delete(item.id);
+      retrying = after;
     }
   }
 
@@ -128,8 +150,18 @@
         </div>
 
         <div class="queue-actions">
-          {#if item.status === 'complete' || item.status === 'failed' || item.status === 'cancelled'}
+          {#if item.status === 'complete'}
             <span class="tag {statusTagClass(item)}" style="font-size: 10px;">{statusLabel(item)}</span>
+          {:else if item.status === 'failed' || item.status === 'cancelled'}
+            <span class="tag {statusTagClass(item)}" style="font-size: 10px;">{statusLabel(item)}</span>
+            {#if item.source && item.source_album_id}
+              <button
+                class="btn btn-ghost btn-sm retry-btn"
+                onclick={(e) => { e.stopPropagation(); retryItem(item); }}
+                disabled={retrying.has(item.id)}
+                title="Retry download"
+              >{retrying.has(item.id) ? '…' : '↻'}</button>
+            {/if}
           {:else}
             <button class="btn btn-ghost btn-sm" onclick={(e) => { e.stopPropagation(); cancelItem(item.id); }} title="Cancel">✕</button>
           {/if}
@@ -284,7 +316,15 @@
   }
 
   .queue-actions {
-    text-align: right;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .retry-btn {
+    font-size: 14px;
+    line-height: 1;
   }
 
   .queue-item-wrapper {

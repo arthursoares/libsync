@@ -2,6 +2,52 @@
 
 All notable changes to Libsync are documented in this file. Release tags are annotated git tags; each section below mirrors the tag message for easy GitHub browsing.
 
+## v0.0.5 — 2026-04-27
+
+Bug-fix and feature release. Headlines: real Tidal HiRes Lossless via a new PKCE OAuth flow (the legacy device-code client was capped at 320 kbps AAC regardless of subscription), search→download metadata round-trip, and a retry button on failed downloads.
+
+### Added
+
+- **Tidal HiRes login.** New "Connect Tidal (HiRes)" button in Settings runs an Authorization Code + PKCE flow against Tidal's HiRes-capable client (`6BDSRdpK9hqEBTgU`). The legacy device-code button is preserved but renamed "(legacy, AAC only)" — it's an entitlement cap on the OAuth client itself, independent of subscription tier. Tokens are persisted with a `tidal_auth_method` marker so refresh dispatches to the matching helper.
+- **DASH manifest + multi-segment download.** PKCE-issued tokens make Tidal return `application/dash+xml` manifests instead of the legacy single-URL JSON. The SDK now parses MPEG-DASH `SegmentTemplate` + `SegmentTimeline`, downloads init + N media segments sequentially, and concatenates them into a fragmented MP4. When `ffmpeg` is on PATH it gets remuxed (`-c:a copy`) into native FLAC so mutagen can tag it; otherwise the file is left as MP4-with-FLAC and a warning logs.
+- **Retry button** on failed/cancelled rows in the Downloads page. Posts to `/api/downloads/queue` with `force=true` so the per-source dedup DB doesn't skip-mark partial downloads.
+- **Search→download metadata round-trip.** Search results now forward their full title/artist/cover/track-count payload alongside `album_ids` when enqueueing. Backend prefers the supplied dict over re-fetching from the streaming service.
+
+### Fixed
+
+- **Search downloads showed `Album <id>` / Unknown.** `_fetch_album_metadata` used to silently fall back to a placeholder string when the SDK round-trip failed, then persist that placeholder to the DB where it stuck. Now: prefer caller-supplied metadata, fail loud when neither is available.
+- **Folder label vs actual codec mismatch (Tidal).** Folders were tagged `[FLAC-…]` even when the real downloads were AAC m4a, because `_tidal_quality_fields` used the album's max-available tier instead of the actual download tier. Now computes `min(album_cap, user_request)`. Also: `HI_RES` (legacy MQA) correctly labels as `[FLAC-16-44.1]` since MQA is physically 16/44.1 with extra subbands.
+- **Folder label sample-rate mismatch (Qobuz).** Same family of bug: a 24/192 album downloaded at CD quality got `[FLAC] [24B-192kHz]`. Now mirrors the requested tier (CD = 16/44.1, tier 3 = 24/96-cap, tier 4 = album max).
+- **`Load More` disappeared after page 1 in Search.** When the Qobuz SDK returned `total=None`, the backend's `getattr(result, "total", default)` leaked `None` to the JSON response (`total: null`), the frontend's `?? items.length` fell back to page size, and `total > results.length` evaluated false. Replaced with an explicit None check.
+- **Tidal silent-downgrade is now visible.** Manifest decode failures used to silently walk down the tier ladder; now a warning logs the requested quality + manifest mime type before fallback. Added a one-line `tidal manifest …` debug log on every successful manifest decode.
+
+### SDK
+
+- **HI_RES_LOSSLESS (tier 4)** added to `QUALITY_MAP`. Settings dropdown gains the new option. Until your Tidal subscription includes it, it falls back via the standard tier walk.
+- **Tidal search envelope** is now defensively unwrapped — handles both `{items, totalNumberOfItems}` and `{albums: {items, …}}` shapes.
+
+### Schema
+
+- `AppConfig` gains `tidal_auth_method: str` (defaults to `"device_code"`; PKCE flow sets it to `"pkce"`). `DownloadRequest` gains an optional `albums: list[DownloadAlbumMetadata]` field.
+
+### API additions
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/auth/tidal/pkce-start` | POST | Returns `auth_url` + `handle` for the PKCE flow |
+| `/api/auth/tidal/pkce-complete` | POST | `{handle, redirect_url}` — exchange code for HiRes-capable token |
+
+### Notes
+
+- **ffmpeg is recommended for HiRes.** Without it, lossless downloads land as MP4-with-FLAC (`.flac` extension but mp4 magic bytes). Most players handle that fine; strict FLAC scanners (and our own mutagen tag pipeline) need real native FLAC.
+- **Tidal subscription tier ≠ OAuth client tier.** Two separate caps. The new HiRes button uses a HiRes-capable client; users on TIDAL Free/Premium will still get capped at HIGH (AAC) by their subscription — but for HiFi/Individual+ accounts, real HiRes is now reachable.
+
+### Commits since v0.0.4
+
+https://github.com/arthursoares/libsync/compare/v0.0.4...v0.0.5
+
+---
+
 ## v0.0.4 — 2026-04-19
 
 Bugfix release on top of v0.0.3. Four issues found while testing the fuzzy-scan against a real 1,800-album library.

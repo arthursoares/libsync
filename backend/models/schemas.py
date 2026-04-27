@@ -63,10 +63,28 @@ class MarkDownloadedRequest(BaseModel):
     local_folder_path: str | None = None
 
 
+class DownloadAlbumMetadata(BaseModel):
+    """Optional metadata supplied alongside album_ids when enqueueing.
+
+    When provided, the backend uses this in preference to re-fetching from
+    the streaming service. Lets a search-result download skip a redundant
+    metadata round-trip (and avoid the 'Album {id}' fallback that bites
+    when that round-trip fails).
+    """
+
+    source_album_id: str
+    title: str
+    artist: str
+    cover_url: str | None = None
+    track_count: int | None = None
+    release_date: str | None = None
+
+
 class DownloadRequest(BaseModel):
     source: str
     album_ids: list[str]
     force: bool = False
+    albums: list[DownloadAlbumMetadata] | None = None
 
 
 class QueueItem(BaseModel):
@@ -125,6 +143,7 @@ class AppConfig(BaseModel):
     qobuz_download_booklets: bool = True
     tidal_quality: int = 3
     tidal_access_token: str = ""
+    tidal_auth_method: str = "device_code"
     downloads_path: str = ""
     max_connections: int = 6
     source_subdirectories: bool = False

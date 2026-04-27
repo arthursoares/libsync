@@ -45,42 +45,32 @@ class DownloadService:
     async def _fetch_album_metadata(self, source: str, source_album_id: str) -> dict:
         """Fetch real album metadata from the streaming service.
 
-        Used when enqueueing a download for an album that's not yet in
-        the local DB (typically a search result).  Falls back to a
-        placeholder name if the SDK call fails — we still want the
-        download to be attempted, just with an ugly queue entry.
+        Raises if the SDK call fails. Callers should prefer caller-supplied
+        metadata (from search results) over invoking this — the placeholder
+        ``Album {id}`` fallback that used to live here masked real auth /
+        network failures by writing the placeholder straight to the DB.
         """
-        fallback = {
-            "title": f"Album {source_album_id}",
-            "artist": "Unknown",
-            "cover_url": None,
-            "track_count": None,
-            "release_date": None,
-        }
         client = self.clients.get(source)
         if client is None or not hasattr(client, "catalog"):
-            return fallback
+            raise ValueError(f"No client configured for source {source!r}")
 
-        try:
-            album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
-        except Exception:
-            logger.exception(
-                "Failed to fetch metadata for %s/%s; using placeholder",
-                source,
-                source_album_id,
-            )
-            return fallback
+        # ``get_album`` is one HTTP call; ``get_album_with_tracks`` adds a
+        # paginated track-list fetch we don't actually need for the queue
+        # entry — every byte of metadata we use lives on the album itself.
+        album = await client.catalog.get_album(source_album_id)
 
-        # The two SDKs return slightly different shapes — both have
-        # `title` and `artist.name`, but `cover` (Tidal) vs `image.large`
-        # (Qobuz raw dicts). The typed Qobuz Album also has helpers.
-        title = getattr(album, "title", None) or fallback["title"]
+        title = getattr(album, "title", "") or ""
         artist_obj = getattr(album, "artist", None)
         artist = (
-            getattr(artist_obj, "name", None) if artist_obj is not None else None
-        ) or fallback["artist"]
+            getattr(artist_obj, "name", "") if artist_obj is not None else ""
+        ) or ""
+        if not title or not artist:
+            raise RuntimeError(
+                f"Streaming service returned empty metadata for "
+                f"{source}/{source_album_id} (title={title!r}, artist={artist!r})"
+            )
 
-        # Cover URL — Tidal exposes a bare cover ID, Qobuz a full URL.
+        # Cover URL — Tidal exposes a bare cover ID, Qobuz a typed ImageSet.
         cover_url: str | None = None
         if source == "tidal":
             cover_id = getattr(album, "cover", None)
@@ -97,15 +87,9 @@ class DownloadService:
                 cover_url = getattr(image, "large", None) or getattr(
                     image, "small", None
                 )
-            if cover_url is None:
-                cover_url = getattr(album, "cover_url", None) or getattr(
-                    album, "cover", None
-                )
 
-        track_count = (
-            getattr(album, "tracks_count", None)
-            or getattr(album, "number_of_tracks", None)
-            or len(tracks)
+        track_count = getattr(album, "tracks_count", None) or getattr(
+            album, "number_of_tracks", None
         )
         release_date = getattr(album, "release_date_original", None) or getattr(
             album, "release_date", None
@@ -120,16 +104,31 @@ class DownloadService:
         }
 
     async def enqueue(
-        self, source: str, album_ids: list[str], force: bool = False
+        self,
+        source: str,
+        album_ids: list[str],
+        force: bool = False,
+        supplied_metadata: dict[str, dict] | None = None,
     ) -> list[dict]:
         items = []
+        supplied_metadata = supplied_metadata or {}
         for source_album_id in album_ids:
             album = self.db.get_album_by_source_id(source, source_album_id)
             if album is None:
-                # Search results aren't in the local DB yet — fetch the real
-                # title/artist/cover from the streaming service so the queue
-                # row doesn't show "Album <id>" + "Unknown".
-                meta = await self._fetch_album_metadata(source, source_album_id)
+                # Prefer metadata supplied by the caller (e.g. search results
+                # already carry title/artist/cover). Only round-trip to the
+                # streaming service when the caller has nothing for us.
+                supplied = supplied_metadata.get(source_album_id)
+                if supplied is not None:
+                    meta = {
+                        "title": supplied["title"],
+                        "artist": supplied["artist"],
+                        "cover_url": supplied.get("cover_url"),
+                        "track_count": supplied.get("track_count"),
+                        "release_date": supplied.get("release_date"),
+                    }
+                else:
+                    meta = await self._fetch_album_metadata(source, source_album_id)
                 album_id = self.db.upsert_album(
                     source=source,
                     source_album_id=source_album_id,
