@@ -66,15 +66,17 @@ def _init_clients(db: AppDatabase) -> dict:
             except ValueError:
                 token_expiry = 0.0
 
+            auth_method = db.get_config("tidal_auth_method") or "device_code"
             client = TidalClient(
                 access_token=tidal_token,
                 refresh_token=refresh_token,
                 user_id=user_id,
                 country_code=country_code,
                 token_expiry=token_expiry,
+                auth_method=auth_method,
             )
             clients["tidal"] = client
-            logger.info("Tidal SDK client initialized")
+            logger.info("Tidal SDK client initialized (auth=%s)", auth_method)
         except Exception:
             logger.exception("Failed to initialize Tidal client")
 

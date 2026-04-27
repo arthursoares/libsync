@@ -381,11 +381,17 @@ class LibraryService:
                 }
             )
 
+        # The Qobuz SDK's PaginatedResult.total is `int | None` — getattr
+        # returns the None value when the attribute exists, so the frontend
+        # would otherwise receive `total: null`, fall back to page size, and
+        # never show the "Load More" button.
+        sdk_total = getattr(result, "total", None)
+        total = sdk_total if sdk_total is not None else len(enriched)
         return {
             "albums": enriched,
-            "total": getattr(result, "total", len(enriched)),
-            "limit": getattr(result, "limit", limit),
-            "offset": getattr(result, "offset", offset),
+            "total": total,
+            "limit": getattr(result, "limit", None) or limit,
+            "offset": getattr(result, "offset", None) if getattr(result, "offset", None) is not None else offset,
         }
 
     def _extract_album_data(self, source, item):

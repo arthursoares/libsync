@@ -229,3 +229,77 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
     await _reload_clients(request)
 
     return {"status": "authorized", "user_id": data["user_id"]}
+
+
+# -- Tidal PKCE (HiRes-capable) -------------------------------------------
+
+# In-memory verifier store, keyed by an opaque handle returned to the
+# client. The verifier is sensitive (it's the proof-of-possession for the
+# auth code) and short-lived (login completes in minutes). A dict on
+# app state is simpler than DB persistence and survives just long enough.
+_pkce_pending: dict[str, dict[str, str]] = {}
+
+
+@router.post("/tidal/pkce-start")
+async def tidal_pkce_start():
+    """Begin a PKCE OAuth flow. Returns the URL to open + a handle the
+    caller must echo back when posting the redirect URL."""
+    import secrets as _secrets
+
+    from tidal.auth import build_pkce_authorize_url, generate_pkce_pair
+
+    verifier, challenge, unique_key = generate_pkce_pair()
+    handle = _secrets.token_urlsafe(16)
+    _pkce_pending[handle] = {"verifier": verifier, "unique_key": unique_key}
+
+    return {
+        "handle": handle,
+        "auth_url": build_pkce_authorize_url(challenge, unique_key),
+        "redirect_uri_prefix": "https://tidal.com/android/login/auth",
+    }
+
+
+class TidalPkceCompleteRequest(BaseModel):
+    handle: str
+    redirect_url: str
+
+
+@router.post("/tidal/pkce-complete")
+async def tidal_pkce_complete(request: Request, body: TidalPkceCompleteRequest):
+    """Finish PKCE: exchange the auth code from the user's pasted URL for
+    access + refresh tokens, persist them, and hot-reload the client."""
+    from tidal.auth import exchange_pkce_code, extract_code_from_redirect
+
+    pending = _pkce_pending.pop(body.handle, None)
+    if pending is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown or expired PKCE handle. Start the flow again.",
+        )
+
+    try:
+        code = extract_code_from_redirect(body.redirect_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        data = await exchange_pkce_code(
+            code, pending["verifier"], pending["unique_key"]
+        )
+    except Exception as e:
+        logger.exception("Tidal PKCE token exchange failed")
+        raise HTTPException(status_code=502, detail=str(e))
+
+    db = request.app.state.db
+    db.set_config("tidal_access_token", data["access_token"])
+    db.set_config("tidal_refresh_token", data["refresh_token"])
+    db.set_config("tidal_user_id", str(data["user_id"]))
+    db.set_config("tidal_country_code", data["country_code"])
+    db.set_config("tidal_token_expiry", str(data["token_expiry"]))
+    db.set_config("tidal_auth_method", "pkce")
+
+    from .config import _reload_clients
+
+    await _reload_clients(request)
+
+    return {"status": "authorized", "user_id": data["user_id"]}
