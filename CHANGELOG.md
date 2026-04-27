@@ -2,6 +2,28 @@
 
 All notable changes to Libsync are documented in this file. Release tags are annotated git tags; each section below mirrors the tag message for easy GitHub browsing.
 
+## v0.0.6 — 2026-04-27
+
+Small UX polish release on top of v0.0.5.1.
+
+### Added
+
+- **Per-page document titles.** Every route (`library`, `search`, `playlists`, `sync`, `settings`, `downloads`) now sets its own `<title>` via `<svelte:head>`, so browser tabs / bookmarks / history land on something meaningful instead of the bare URL path.
+
+### Changed
+
+- **UI rebrand to "Libsync".** Replaces the last user-facing `streamrip` strings: app `<title>` default, sidebar header (also drops the stale "v3.0.0 — library manager" subtitle inherited from the upstream Python package version, in favor of "Qobuz & Tidal library manager"), Settings *Download Path* placeholder. Internals that retain the legacy `streamrip` name (Python module, `STREAMRIP_DB_PATH`, `streamrip.db`, `.streamrip.json`, `logging.getLogger("streamrip")`) stay as-is per the v1.0 plan in `CLAUDE.md`.
+
+### Internal
+
+- SDK submodule pin bumped from the v0.0.5.1 feature-branch SHA to the merged `main` SHA on `arthursoares/qobuz_tidal_api_client`. Same code; pin now points at a published, non-feature-branch commit.
+
+### Commits since v0.0.5.1
+
+https://github.com/arthursoares/libsync/compare/v0.0.5.1...v0.0.6
+
+---
+
 ## v0.0.5 — 2026-04-27
 
 Bug-fix and feature release. Headlines: real Tidal HiRes Lossless via a new PKCE OAuth flow (the legacy device-code client was capped at 320 kbps AAC regardless of subscription), search→download metadata round-trip, and a retry button on failed downloads.
