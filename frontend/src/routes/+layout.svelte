@@ -122,9 +122,9 @@
   <aside class="sidebar" class:open={sidebarOpen}>
     <div class="sidebar-header">
       <div class="sidebar-logo">
-        <span class="logo-accent">◆</span> streamrip
+        <span class="logo-accent">◆</span> Libsync
       </div>
-      <div class="sidebar-version">v3.0.0 — library manager</div>
+      <div class="sidebar-version">Qobuz &amp; Tidal library manager</div>
     </div>
 
     <div class="source-selector">

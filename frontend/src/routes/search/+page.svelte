@@ -173,6 +173,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>Search — Libsync</title>
+</svelte:head>
+
 <div class="page-header">
   <div>
     <div class="page-title">Search</div>
