@@ -1,6 +1,6 @@
 ---
 name: libsync-validation-and-qa
-description: Use when preparing to push or open a PR in libsync, deciding which checks to run before merge, adding or locating tests, or judging whether a fix has enough evidence. Also use on these symptoms: make lint fails with RUF100 errors on a clean main checkout, local ruff results differ from CI, node --test reports a single failing "tests" entry, a required check (backend-tests, frontend-build, docker-publish, ruff) blocks a merge, or a change is claimed to "work on my machine" without a test.
+description: Use when preparing to push or open a PR in libsync, deciding which checks to run before merge, adding or locating tests, or judging whether a fix has enough evidence. Also use on these symptoms — make lint fails with RUF100 errors on a clean main checkout, local ruff results differ from CI, node --test reports a single failing "tests" entry, a required check (backend-tests, frontend-build, docker-publish, ruff) blocks a merge, or a change is claimed to "work on my machine" without a test.
 ---
 
 # libsync validation and QA

@@ -1,6 +1,6 @@
 ---
 name: libsync-qobuz-auth-campaign
-description: Use when building in-app Qobuz token-expiry recovery, wiring the dead `token_expired` WebSocket event to a real publisher and Settings banner, making Qobuz download-secret resolution observable, or hardening the play.qobuz.com spoofer chain. Symptoms: every Qobuz call 401s after a period of working; Qobuz 401 shows only a generic "Download failed" toast with no re-auth prompt; users must restart or re-login to recover an expired Qobuz token; secret-tier winner is invisible in logs.
+description: Use when building in-app Qobuz token-expiry recovery, wiring the dead `token_expired` WebSocket event to a real publisher and Settings banner, making Qobuz download-secret resolution observable, or hardening the play.qobuz.com spoofer chain. Symptoms — every Qobuz call 401s after a period of working; Qobuz 401 shows only a generic "Download failed" toast with no re-auth prompt; users must restart or re-login to recover an expired Qobuz token; secret-tier winner is invisible in logs.
 ---
 
 # Libsync Qobuz Auth Resilience Campaign
