@@ -342,3 +342,86 @@ class TestProcessQueueHandlesFailure:
 
         album_after = db.get_album(db_id)
         assert album_after["download_status"] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# The completed-download write-back must not wipe the rest of the album row
+# ---------------------------------------------------------------------------
+
+
+class TestCompletedDownloadPreservesMetadata:
+    async def test_download_keeps_cover_and_metadata(self, db, event_bus):
+        """A finished download resolves only title/artist/track_count.
+
+        It used to write those back through ``upsert_album``, whose
+        ``DO UPDATE`` set every omitted column to NULL — so every album lost
+        its cover art and metadata the moment it finished downloading.
+        """
+        db_id = db.upsert_album(
+            source="qobuz",
+            source_album_id="rich-album",
+            title="Placeholder Title",
+            artist="Placeholder Artist",
+            release_date="2007-10-10",
+            label="XL Recordings",
+            genre="Alternative",
+            track_count=10,
+            duration_seconds=2718,
+            cover_url="https://example/cover.jpg",
+            quality="FLAC 24/96kHz",
+            bit_depth=24,
+            sample_rate=96.0,
+            added_to_library_at="2026-04-01T10:00:00",
+        )
+
+        result = FakeAlbumResult(
+            total=4,
+            successful=4,
+            title="In Rainbows",
+            artist="Radiohead",
+            tracks=[
+                FakeTrackResult(
+                    track_id=i, title=f"T{i}", success=True, path=f"/x/{i}.flac"
+                )
+                for i in range(4)
+            ],
+        )
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path="/tmp"
+        )
+        item = {
+            "id": "queue-rich",
+            "album_db_id": db_id,
+            "source": "qobuz",
+            "source_album_id": "rich-album",
+            "title": "Placeholder Title",
+            "artist": "Placeholder Artist",
+            "cover_url": "https://example/cover.jpg",
+            "track_count": 10,
+            "tracks_done": 0,
+            "bytes_done": 0,
+            "bytes_total": 0,
+            "speed": 0.0,
+            "status": "downloading",
+            "force": False,
+        }
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            await service._download_album(item)
+
+        album = db.get_album(db_id)
+        # The three fields the download actually resolved:
+        assert album["title"] == "In Rainbows"
+        assert album["artist"] == "Radiohead"
+        assert album["track_count"] == 4
+        # Everything else must survive untouched:
+        assert album["cover_url"] == "https://example/cover.jpg"
+        assert album["release_date"] == "2007-10-10"
+        assert album["label"] == "XL Recordings"
+        assert album["genre"] == "Alternative"
+        assert album["duration_seconds"] == 2718
+        assert album["quality"] == "FLAC 24/96kHz"
+        assert album["bit_depth"] == 24
+        assert album["added_to_library_at"] == "2026-04-01T10:00:00"

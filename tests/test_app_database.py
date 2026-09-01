@@ -168,6 +168,62 @@ class TestConfig:
         assert db.get_config("key") == "new"
 
 
+class TestDownloadPathMetadata:
+    def test_update_album_resolved_metadata_preserves_other_columns(self, db):
+        """The download path resolves only title/artist/track_count.
+
+        Routing it through ``upsert_album`` set every omitted column to the
+        None of its default kwarg, wiping cover art and metadata off every
+        album as soon as its download finished.
+        """
+        album_id = db.upsert_album(
+            source="qobuz",
+            source_album_id="abc123",
+            title="Placeholder",
+            artist="Placeholder",
+            release_date="2007-10-10",
+            label="XL Recordings",
+            genre="Alternative",
+            track_count=10,
+            duration_seconds=2718,
+            cover_url="https://example/cover.jpg",
+            quality="FLAC 24/96kHz",
+            bit_depth=24,
+            sample_rate=96.0,
+            added_to_library_at="2026-04-01T10:00:00",
+        )
+
+        db.update_album_resolved_metadata(
+            album_id, title="In Rainbows", artist="Radiohead", track_count=15
+        )
+
+        album = db.get_album(album_id)
+        assert album["title"] == "In Rainbows"
+        assert album["artist"] == "Radiohead"
+        assert album["track_count"] == 15
+        assert album["cover_url"] == "https://example/cover.jpg"
+        assert album["release_date"] == "2007-10-10"
+        assert album["label"] == "XL Recordings"
+        assert album["genre"] == "Alternative"
+        assert album["duration_seconds"] == 2718
+        assert album["quality"] == "FLAC 24/96kHz"
+        assert album["bit_depth"] == 24
+        assert album["sample_rate"] == 96.0
+        assert album["added_to_library_at"] == "2026-04-01T10:00:00"
+
+    def test_upsert_album_still_overwrites_metadata(self, db):
+        """Guard the other half of the contract: sync relies on upsert
+        replacing stale metadata, so that behaviour must not change."""
+        album_id = db.upsert_album(
+            "qobuz", "abc123", "T", "A", label="Old Label", genre="Old Genre"
+        )
+        db.upsert_album("qobuz", "abc123", "T", "A", label="New Label")
+
+        album = db.get_album(album_id)
+        assert album["label"] == "New Label"
+        assert album["genre"] is None
+
+
 class TestStatusFilterSentinel:
     def test_count_albums_treats_all_as_no_filter(self, db):
         """get_albums skips the filter for "all"; count_albums used to

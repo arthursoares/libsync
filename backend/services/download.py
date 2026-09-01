@@ -458,11 +458,14 @@ class DownloadService:
         item["track_count"] = result.total
         item["tracks_done"] = result.successful
 
-        # Update album metadata in DB with resolved data from download
+        # Update album metadata in DB with resolved data from download.
+        # This is a narrow UPDATE, not an upsert: upsert_album overwrites
+        # cover_url/release_date/label/genre/duration_seconds/quality with the
+        # None of every omitted kwarg, which used to wipe the cover art off
+        # every album the moment its download finished.
         if result.title and result.artist:
-            self.db.upsert_album(
-                source=item["source"],
-                source_album_id=item["source_album_id"],
+            self.db.update_album_resolved_metadata(
+                item["album_db_id"],
                 title=result.title,
                 artist=result.artist,
                 track_count=result.total,

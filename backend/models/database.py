@@ -340,6 +340,32 @@ class AppDatabase:
                     (status, album_id),
                 )
 
+    def update_album_resolved_metadata(
+        self,
+        album_id: int,
+        title: str,
+        artist: str,
+        track_count: int | None = None,
+    ) -> None:
+        """Write back the title/artist/track_count a download resolved.
+
+        Deliberately narrow: the download path only learns these three
+        fields, so it must not go through ``upsert_album``, whose
+        ``DO UPDATE`` overwrites every other metadata column with the
+        ``None`` of an omitted kwarg — wiping cover_url, release_date,
+        label, genre, duration_seconds and quality off a downloaded album.
+        Sync legitimately relies on that overwrite behaviour, so the fix
+        belongs here rather than in ``upsert_album``.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET title = ?, artist = ?,
+                       track_count = COALESCE(?, track_count)
+                   WHERE id = ?""",
+                (title, artist, track_count, album_id),
+            )
+
     def get_all_albums_for_index(self, user_id: int = 1) -> list[dict]:
         """Return every album as a lean dict for building a match index."""
         with self._connect() as conn:
