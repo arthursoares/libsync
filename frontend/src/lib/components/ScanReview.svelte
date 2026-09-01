@@ -23,6 +23,7 @@
     auto_matched?: { album_id: number; folder: string; reason: string }[];
     review?: ReviewEntry[];
     unmatched?: string[];
+    failed?: { folder: string; album_id: number; error: string }[];
     error?: string;
   }
 
@@ -43,7 +44,7 @@
       await onConfirm(candidate.album_id, entry.folder);
       // Remove the entry from the list.
       if (result.review) {
-        result.review = result.review.filter(e => e !== entry);
+        result.review = result.review.filter((e: ReviewEntry) => e !== entry);
       }
     } finally {
       processing.delete(candidate.album_id);
@@ -76,6 +77,7 @@
         {result.review?.length ?? 0} need review ·
         {result.unmatched?.length ?? 0} unmatched
         {#if result.sentinel_skipped}· {result.sentinel_skipped} already sentineled{/if}
+        {#if result.failed?.length}· {result.failed.length} failed{/if}
       </p>
 
       <!-- Auto-matched -->

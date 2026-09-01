@@ -1,5 +1,6 @@
 """End-to-end scan job over a synthetic music folder."""
 
+import sqlite3
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -207,6 +208,60 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
     assert auto_ids == {1, 2}
     assert any("_tuning" in u for u in result["unmatched"])
     assert result["scanned"] == 3
+
+
+@pytest.mark.asyncio
+async def test_run_scan_reports_failed_marks_and_keeps_going(
+    tmp_path, library, monkeypatch
+):
+    """A single failing mark (e.g. a locked dedup DB) must not unwind the job
+    and throw away every album already marked."""
+    import backend.services.scan as scan_mod
+
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _album(music / "The Beatles - Revolver", 14)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            },
+            "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 24},
+        },
+    )
+
+    original = scan_mod.mark_album_downloaded
+
+    def flaky(db, album_id, **kwargs):
+        if album_id == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(db, album_id, **kwargs)
+
+    monkeypatch.setattr(scan_mod, "mark_album_downloaded", flaky)
+
+    result = await run_scan(
+        library,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    # The scan still completed and the healthy album was still marked.
+    assert result["status"] == "complete"
+    assert result["scanned"] == 2
+    assert [e["album_id"] for e in result["auto_matched"]] == [2]
+    assert library.get_album(2)["download_status"] == "complete"
+
+    # The casualty is reported rather than silently dropped.
+    assert len(result["failed"]) == 1
+    entry = result["failed"][0]
+    assert entry["album_id"] == 1
+    assert "Abbey Road" in entry["folder"]
+    assert "database is locked" in entry["error"]
 
 
 @pytest.mark.asyncio

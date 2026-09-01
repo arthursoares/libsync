@@ -313,11 +313,23 @@ def _dedup_db_path(source: str, dedup_db_dir: str) -> str:
     return os.path.join(dedup_db_dir, fname)
 
 
+def _connect_dedup(path: str) -> sqlite3.Connection:
+    """Open a dedup DB the same way AppDatabase._connect opens the app DB.
+
+    The download service writes these files concurrently with a scan, so a
+    busy timeout and WAL journalling are what keep both sides from hitting
+    "database is locked".
+    """
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def _populate_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
     """Insert track IDs into the per-source dedup DB. Idempotent."""
     path = _dedup_db_path(source, dedup_db_dir)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = _connect_dedup(path)
     try:
         conn.executescript(_DEDUP_SCHEMA)
         conn.executemany(
@@ -333,7 +345,7 @@ def _remove_from_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> 
     path = _dedup_db_path(source, dedup_db_dir)
     if not os.path.exists(path):
         return
-    conn = sqlite3.connect(path)
+    conn = _connect_dedup(path)
     try:
         conn.executemany(
             "DELETE FROM downloads WHERE id = ?",
@@ -517,6 +529,7 @@ async def run_scan(
             "auto_matched": [],
             "review": [],
             "unmatched": [],
+            "failed": [],
         }
 
     folders, skipped_dirs = await asyncio.to_thread(_find_album_folders, root)
@@ -525,6 +538,7 @@ async def run_scan(
     auto_matched: list[dict] = []
     review: list[dict] = []
     unmatched: list[str] = []
+    failed: list[dict] = []
     sentinel_skipped = 0
 
     for i, folder in enumerate(folders, start=1):
@@ -541,21 +555,37 @@ async def run_scan(
         result = classify(meta, index)
 
         if result.kind == "auto_match":
-            await asyncio.to_thread(
-                mark_album_downloaded,
-                db,
-                result.album_id,
-                local_folder_path=str(folder),
-                dedup_db_dir=dedup_db_dir,
-                sentinel_write_enabled=sentinel_write_enabled,
-            )
-            auto_matched.append(
-                {
-                    "album_id": result.album_id,
-                    "folder": str(folder),
-                    "reason": result.reason,
-                }
-            )
+            # One unlucky folder (a locked dedup DB, an album deleted
+            # mid-scan) must not unwind the whole job and discard every
+            # album marked so far — record it and keep going.
+            try:
+                await asyncio.to_thread(
+                    mark_album_downloaded,
+                    db,
+                    result.album_id,
+                    local_folder_path=str(folder),
+                    dedup_db_dir=dedup_db_dir,
+                    sentinel_write_enabled=sentinel_write_enabled,
+                )
+            except Exception as e:
+                logger.exception(
+                    "scan: could not mark album %s for %s", result.album_id, folder
+                )
+                failed.append(
+                    {
+                        "folder": str(folder),
+                        "album_id": result.album_id,
+                        "error": str(e),
+                    }
+                )
+            else:
+                auto_matched.append(
+                    {
+                        "album_id": result.album_id,
+                        "folder": str(folder),
+                        "reason": result.reason,
+                    }
+                )
         elif result.kind == "review":
             review.append(
                 {
@@ -588,6 +618,7 @@ async def run_scan(
         "auto_matched": auto_matched,
         "review": review,
         "unmatched": unmatched,
+        "failed": failed,
     }
     await event_bus.publish("scan_complete", payload)
     return payload

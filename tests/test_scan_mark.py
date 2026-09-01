@@ -201,3 +201,23 @@ def test_unmark_reverses_everything(tmp_path, db):
     assert row["local_folder_path"] is None
     assert not (folder / ".streamrip.json").exists()
     assert _dedup_rows(_dedup_path(tmp_path, "qobuz")) == []
+
+
+def test_dedup_db_opened_in_wal_mode(tmp_path, db):
+    """The download service writes the dedup DBs while a scan runs — WAL plus
+    a busy timeout is what keeps the two off each other's locks."""
+    d, album_id = db
+    mark_album_downloaded(
+        d,
+        album_id,
+        local_folder_path=None,
+        dedup_db_dir=str(tmp_path),
+        sentinel_write_enabled=False,
+    )
+
+    conn = sqlite3.connect(_dedup_path(tmp_path, "qobuz"))
+    try:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conn.close()
+    assert mode.lower() == "wal"
