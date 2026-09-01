@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
+from ..services.download import _parse_bool
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
 
 logger = logging.getLogger("streamrip")
@@ -109,9 +110,9 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
     if db.get_album(album_id) is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
-    sentinel_enabled = (
-        db.get_config("scan_sentinel_write_enabled") or "True"
-    ) == "True"
+    sentinel_enabled = _parse_bool(
+        db.get_config("scan_sentinel_write_enabled"), default=True
+    )
 
     resolved_path, err = _validate_local_folder_path(db, body.local_folder_path)
     if err is not None:
@@ -159,9 +160,9 @@ async def start_scan(request: Request):
 
     db = app.state.db
     download_path = _resolve_downloads_root(db)
-    sentinel_enabled = (
-        db.get_config("scan_sentinel_write_enabled") or "True"
-    ) == "True"
+    sentinel_enabled = _parse_bool(
+        db.get_config("scan_sentinel_write_enabled"), default=True
+    )
 
     job_id = uuid.uuid4().hex
     app.state.scan_jobs[job_id] = {
