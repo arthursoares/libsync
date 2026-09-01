@@ -257,6 +257,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         "sync_started",
         "sync_complete",
         "library_updated",
+        "album_status_changed",
         "token_expired",
     ):
 
