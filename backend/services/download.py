@@ -24,6 +24,28 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in ("true", "1", "yes")
 
 
+SENTINEL_FILENAME = ".streamrip.json"
+
+
+def _remove_album_sentinel(folder: str | None) -> None:
+    """Best-effort delete of the SDK-written sentinel in ``folder``.
+
+    Both SDK downloaders drop a ``.streamrip.json`` as soon as one track
+    succeeds, and ``run_scan`` skips any folder that has one. A download
+    that fails the success threshold must therefore take the sentinel back
+    off disk, or the half-downloaded folder is invisible to reconciliation
+    forever.
+    """
+    if not folder:
+        return
+    try:
+        os.remove(os.path.join(folder, SENTINEL_FILENAME))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("download: could not remove sentinel in %s: %s", folder, exc)
+
+
 def _album_folder_from_result(result) -> str | None:
     """Derive the album folder the SDK downloaded into, or None.
 
@@ -546,15 +568,22 @@ class DownloadService:
             item["title"] = result.title
             item["artist"] = result.artist
 
-        # Update track statuses in web DB
-        self._update_track_statuses_from_result(item, result)
-
-        # Check 80% success threshold
+        # Check the 80% success threshold BEFORE writing track statuses back:
+        # a sub-threshold album is treated as failed, so its track rows must
+        # not be left claiming "complete".
         if result.total > 0 and result.success_rate < 0.8:
+            # The SDK already wrote its sentinel for the tracks that did
+            # succeed. Remove it so the fuzzy scan can still classify this
+            # folder later. Dedup rows are deliberately left in place: they
+            # are accurate for those tracks and let a retry skip them.
+            _remove_album_sentinel(item.get("local_folder_path"))
             raise RuntimeError(
                 f"Only {result.successful}/{result.total} tracks downloaded "
                 f"({result.success_rate:.0%}), below 80% threshold"
             )
+
+        # Update track statuses in web DB
+        self._update_track_statuses_from_result(item, result)
 
         logger.info(
             "Download complete: %s - %s (%d/%d tracks)",
