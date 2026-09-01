@@ -50,6 +50,12 @@ build-backend = "poetry.core.masonry.api"
 # .claude/ holds maintainer tooling (skill library + diagnostic scripts), not
 # product code. Keep it out of the linter so the required `ruff` check ignores it.
 extend-exclude = [".claude"]
+# Restrict ruff's file discovery to Python source. Ruff 0.16+ started
+# formatting fenced ```python code blocks embedded in Markdown files by
+# default, which would flag docs/superpowers/*.md and break the required
+# `ruff` check on CI's whole-repo scan even though the docs aren't ours to
+# lint. Pinning this include list keeps that out regardless of ruff version.
+include = ["*.py", "*.pyi", "**/pyproject.toml"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "ASYNC", "N", "RUF", "ERA001"]
