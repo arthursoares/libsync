@@ -478,6 +478,18 @@ def _find_album_folders(root: Path, max_depth: int = 3) -> tuple[list[Path], lis
     return sorted(results), skipped
 
 
+def _inspect_folder(folder: Path) -> tuple[bool, FolderMeta | None]:
+    """Sentinel probe + tag read, together, for one album folder.
+
+    Both are blocking file-system calls, so they share a single worker
+    thread hop. Returns (has_sentinel, meta); ``meta`` is None when the
+    folder is sentineled or holds no readable audio.
+    """
+    if (folder / ".streamrip.json").exists():
+        return True, None
+    return False, read_folder_metadata(folder)
+
+
 async def run_scan(
     db,
     *,
@@ -507,7 +519,7 @@ async def run_scan(
             "unmatched": [],
         }
 
-    folders, skipped_dirs = _find_album_folders(root)
+    folders, skipped_dirs = await asyncio.to_thread(_find_album_folders, root)
     total = len(folders)
 
     auto_matched: list[dict] = []
@@ -516,12 +528,12 @@ async def run_scan(
     sentinel_skipped = 0
 
     for i, folder in enumerate(folders, start=1):
-        if (folder / ".streamrip.json").exists():
+        has_sentinel, meta = await asyncio.to_thread(_inspect_folder, folder)
+        if has_sentinel:
             sentinel_skipped += 1
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue
 
-        meta = await asyncio.to_thread(read_folder_metadata, folder)
         if meta is None:
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue

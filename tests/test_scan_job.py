@@ -1,5 +1,6 @@
 """End-to-end scan job over a synthetic music folder."""
 
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -206,6 +207,58 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
     assert auto_ids == {1, 2}
     assert any("_tuning" in u for u in result["unmatched"])
     assert result["scanned"] == 3
+
+
+@pytest.mark.asyncio
+async def test_run_scan_does_filesystem_work_off_the_event_loop(
+    tmp_path, library, monkeypatch
+):
+    """The directory walk and the per-folder sentinel probe are blocking
+    file-system calls — on a network mount they would freeze the API for the
+    whole scan, so both must happen in a worker thread."""
+    import backend.services.scan as scan_mod
+
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            }
+        },
+    )
+
+    loop_thread = threading.get_ident()
+    ran_on: dict[str, int] = {}
+    original_find = scan_mod._find_album_folders
+    original_inspect = scan_mod._inspect_folder
+
+    def spy_find(*args, **kwargs):
+        ran_on["find"] = threading.get_ident()
+        return original_find(*args, **kwargs)
+
+    def spy_inspect(*args, **kwargs):
+        ran_on["inspect"] = threading.get_ident()
+        return original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(scan_mod, "_find_album_folders", spy_find)
+    monkeypatch.setattr(scan_mod, "_inspect_folder", spy_inspect)
+
+    result = await run_scan(
+        library,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert ran_on["find"] != loop_thread
+    assert ran_on["inspect"] != loop_thread
+    # Behaviour is unchanged by the thread hop.
+    assert {e["album_id"] for e in result["auto_matched"]} == {1}
 
 
 def test_find_album_folders_skips_unreadable_dirs(tmp_path):
