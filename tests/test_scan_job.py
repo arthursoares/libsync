@@ -14,6 +14,16 @@ def _touch(path: Path, content: str = "") -> None:
     path.write_text(content)
 
 
+def _album(folder: Path, track_count: int) -> None:
+    """Create an album-shaped folder holding `track_count` audio files.
+
+    The matcher only auto-matches when the folder's file count equals the
+    library album's track_count, so the counts here have to be honest.
+    """
+    for n in range(1, track_count + 1):
+        _touch(folder / f"{n:02d}.flac")
+
+
 @pytest.fixture
 def library(tmp_path):
     db = AppDatabase(str(tmp_path / "libsync.db"))
@@ -63,9 +73,9 @@ def _patch_mutagen(monkeypatch, specs: dict):
 @pytest.mark.asyncio
 async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
     music = tmp_path / "music"
-    _touch(music / "The Beatles - Abbey Road" / "01.flac")
-    _touch(music / "The Beatles - Revolver" / "01.flac")
-    _touch(music / "Unknown Band - Whatever" / "01.flac")
+    _album(music / "The Beatles - Abbey Road", 17)
+    _album(music / "The Beatles - Revolver", 14)
+    _album(music / "Unknown Band - Whatever", 9)
 
     _patch_mutagen(
         monkeypatch,
@@ -105,6 +115,39 @@ async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_scan_sends_partial_folder_to_review(tmp_path, library, monkeypatch):
+    """An interrupted download (3 of 17 files) must not be auto-marked."""
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 3)
+
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            }
+        },
+    )
+
+    result = await run_scan(
+        library,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert result["auto_matched"] == []
+    assert len(result["review"]) == 1
+    reason = result["review"][0]["candidates"][0]["reason"]
+    assert "track_count_mismatch: local=3 library=17" in reason
+    # The album was left alone — no status flip, no dedup rows.
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+
+
+@pytest.mark.asyncio
 async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch):
     music = tmp_path / "music"
     album_dir = music / "The Beatles - Abbey Road"
@@ -132,8 +175,8 @@ async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch)
 async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch):
     music = tmp_path / "music"
     # Library seeds "Abbey Road" + "Revolver" by The Beatles in the library fixture.
-    _touch(music / "The Beatles" / "(1969) Abbey Road [FLAC-24-96]" / "01.flac")
-    _touch(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]" / "01.flac")
+    _album(music / "The Beatles" / "(1969) Abbey Road [FLAC-24-96]", 17)
+    _album(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]", 14)
     _touch(music / "_tuning" / "TestSignal.wav")  # no artist folder above
 
     _patch_mutagen(

@@ -217,6 +217,20 @@ def _bit_depth_matches(local: int | None, library: int | None) -> bool:
     return local == library
 
 
+def _track_count_matches(local: int | None, library: int | None) -> bool:
+    """Unknown (None or 0) on either side is treated as 'compatible'.
+
+    A folder holding a different number of audio files than the library
+    album is usually an interrupted download. Auto-matching it would flip
+    the album to complete AND write every track ID into the dedup DB, so
+    the missing tracks could never be fetched again — those cases must go
+    to review instead.
+    """
+    if not local or not library:
+        return True
+    return local == library
+
+
 def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     norm_artist = normalize(meta.artist)
     norm_album = normalize(meta.album)
@@ -229,18 +243,20 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     if not candidates:
         return MatchResult(kind="unmatched")
 
-    # Partition candidates by bit-depth compatibility.
+    # Partition candidates by bit-depth AND track-count compatibility.
     compatible: list[dict] = []
     for album in candidates:
-        if _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
+        if _bit_depth_matches(
+            meta.bit_depth, album.get("bit_depth")
+        ) and _track_count_matches(meta.track_count, album.get("track_count")):
             compatible.append(album)
 
     # Auto-match only when we have exactly one candidate overall AND exactly
     # one compatible candidate AND the folder had a reliable artist (so
     # album-only fallback matches always need review). Requiring the original
     # pool to also be a singleton prevents silently auto-matching when the
-    # bit-depth filter happened to narrow multiple candidates (e.g. Qobuz +
-    # Tidal copies of the same album) down to one.
+    # compatibility filter happened to narrow multiple candidates (e.g. Qobuz
+    # + Tidal copies of the same album) down to one.
     if len(candidates) == 1 and len(compatible) == 1 and norm_artist:
         a = compatible[0]
         return MatchResult(
@@ -258,6 +274,11 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
         if not _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
             reasons.append(
                 f"bit_depth_mismatch: local={meta.bit_depth} library={album.get('bit_depth')}"
+            )
+        if not _track_count_matches(meta.track_count, album.get("track_count")):
+            reasons.append(
+                f"track_count_mismatch: local={meta.track_count} "
+                f"library={album.get('track_count')}"
             )
         if len(candidates) > 1 and not reasons:
             reasons.append("multiple_candidates")
