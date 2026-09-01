@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { onEvent } from './websocket';
+import { shouldReloadQueueForUnknownItem } from './downloads-logic.js';
 
 export const queue = writable<any[]>([]);
 export const activeCount = writable(0);
@@ -42,8 +43,30 @@ export async function loadQueue() {
   }, 300);
 }
 
+/**
+ * Enqueue album(s) for download and refresh the queue store so the new
+ * pending item(s) show up without waiting for the next WebSocket event
+ * or a visit to the Downloads page. All call sites that enqueue downloads
+ * should go through this instead of calling `api.downloads.enqueue`
+ * directly, so the store — and therefore any UI reading from it — stays
+ * in sync. `api.downloads.enqueue` throws on a non-2xx response (and the
+ * shared client already toasts the error), so callers keep their existing
+ * try/catch UI behaviour.
+ */
+export async function enqueueDownloads(
+  source: string,
+  albumIds: string[],
+  options?: Parameters<typeof api.downloads.enqueue>[2],
+) {
+  const result = await api.downloads.enqueue(source, albumIds, options);
+  loadQueue();
+  return result;
+}
+
 onEvent('download_progress', (data) => {
+  let itemMissing = false;
   queue.update(items => {
+    itemMissing = shouldReloadQueueForUnknownItem(items, (data as any).item_id);
     const updated = items.map(item =>
       item.id === data.item_id ? { ...item, ...data } : item
     );
@@ -53,6 +76,15 @@ onEvent('download_progress', (data) => {
     activeCount.set(downloading.length);
     return updated;
   });
+
+  if (itemMissing) {
+    // A progress event arrived for an item this client doesn't know about
+    // yet — e.g. this client's own enqueue debounce hasn't resolved, or
+    // another client/session enqueued it. Reload from the server instead
+    // of silently dropping the event (the .map() above is a no-op for an
+    // id it doesn't recognize).
+    loadQueue();
+  }
 
   // Mirror per-track statuses into liveTrackStatuses keyed by source_album_id
   // so AlbumDetail can render live progress without subscribing to the queue.

@@ -37,7 +37,7 @@
   import { onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
   import { currentSource, loadAlbumDetail } from '$lib/stores/library';
-  import { lastCompletedDownload, liveTrackStatuses } from '$lib/stores/downloads';
+  import { lastCompletedDownload, liveTrackStatuses, enqueueDownloads } from '$lib/stores/downloads';
 
   let {
     album,
@@ -241,11 +241,7 @@
     downloadError = '';
     downloadQueued = false;
     try {
-      await fetch('/api/downloads/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, album_ids: [albumId], force }),
-      });
+      await enqueueDownloads(source, [albumId], { force });
       downloadQueued = true;
       setTimeout(() => { downloadQueued = false; }, 3000);
     } catch (e: any) {

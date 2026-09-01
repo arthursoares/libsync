@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
 
   interface TrackStatus {
     num?: number;
@@ -54,7 +55,7 @@
     try {
       // force=true bypasses the per-source dedup DB so partially-downloaded
       // tracks get re-fetched instead of being skip-marked as "already done".
-      await api.downloads.enqueue(item.source, [item.source_album_id], { force: true });
+      await enqueueDownloads(item.source, [item.source_album_id], { force: true });
     } catch (e) {
       console.error('Failed to retry download', e);
     } finally {

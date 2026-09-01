@@ -11,6 +11,7 @@
     loadAlbumDetail,
   } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
   import { isSourceAuthenticated } from '$lib/auth-ui-logic.js';
 
   let albumList = $derived($albums);
@@ -63,7 +64,7 @@
     if (selectedAlbums.size === 0) return;
     batchDownloading = true;
     try {
-      await api.downloads.enqueue(source, [...selectedAlbums]);
+      await enqueueDownloads(source, [...selectedAlbums]);
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
@@ -161,7 +162,7 @@
     });
     if (newAlbums.length === 0) return;
     try {
-      await api.downloads.enqueue(
+      await enqueueDownloads(
         source,
         newAlbums.map((a) => a.source_album_id || String(a.id))
       );
