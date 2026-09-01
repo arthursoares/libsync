@@ -75,6 +75,8 @@ async def get_albums(
     search: str | None = None,
 ):
     service = request.app.state.library_service
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
     return await service.get_albums(
         source,
         page=page,
