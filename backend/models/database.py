@@ -340,6 +340,32 @@ class AppDatabase:
                     (status, album_id),
                 )
 
+    def update_album_resolved_metadata(
+        self,
+        album_id: int,
+        title: str,
+        artist: str,
+        track_count: int | None = None,
+    ) -> None:
+        """Write back the title/artist/track_count a download resolved.
+
+        Deliberately narrow: the download path only learns these three
+        fields, so it must not go through ``upsert_album``, whose
+        ``DO UPDATE`` overwrites every other metadata column with the
+        ``None`` of an omitted kwarg — wiping cover_url, release_date,
+        label, genre, duration_seconds and quality off a downloaded album.
+        Sync legitimately relies on that overwrite behaviour, so the fix
+        belongs here rather than in ``upsert_album``.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE albums
+                   SET title = ?, artist = ?,
+                       track_count = COALESCE(?, track_count)
+                   WHERE id = ?""",
+                (title, artist, track_count, album_id),
+            )
+
     def get_all_albums_for_index(self, user_id: int = 1) -> list[dict]:
         """Return every album as a lean dict for building a match index."""
         with self._connect() as conn:
@@ -390,7 +416,9 @@ class AppDatabase:
     ) -> int:
         conditions = ["source = ?", "user_id = ?"]
         params: list = [source, user_id]
-        if status:
+        # "all" is the no-filter sentinel; it must be interpreted exactly as
+        # get_albums does, or pagination totals read 0 for a page of rows.
+        if status and status != "all":
             conditions.append("download_status = ?")
             params.append(status)
         if search:
@@ -466,10 +494,16 @@ class AppDatabase:
         bit_depth: int | None = None,
         sample_rate: int | None = None,
     ):
+        # The metadata columns are COALESCEd so a status-only call (the sole
+        # caller in DownloadService passes just a status) doesn't NULL the
+        # file_path/format/bit_depth/sample_rate recorded by an earlier write.
         with self._connect() as conn:
             conn.execute(
-                """UPDATE tracks SET download_status=?, file_path=?,
-                   format=?, bit_depth=?, sample_rate=?
+                """UPDATE tracks SET download_status=?,
+                   file_path=COALESCE(?, file_path),
+                   format=COALESCE(?, format),
+                   bit_depth=COALESCE(?, bit_depth),
+                   sample_rate=COALESCE(?, sample_rate)
                    WHERE id=?""",
                 (status, file_path, format, bit_depth, sample_rate, track_id),
             )

@@ -111,68 +111,93 @@ class DownloadService:
         supplied_metadata: dict[str, dict] | None = None,
     ) -> list[dict]:
         items = []
+        errors: list[Exception] = []
         supplied_metadata = supplied_metadata or {}
-        for source_album_id in album_ids:
-            album = self.db.get_album_by_source_id(source, source_album_id)
-            if album is None:
-                # Prefer metadata supplied by the caller (e.g. search results
-                # already carry title/artist/cover). Only round-trip to the
-                # streaming service when the caller has nothing for us.
-                supplied = supplied_metadata.get(source_album_id)
-                if supplied is not None:
-                    meta = {
-                        "title": supplied["title"],
-                        "artist": supplied["artist"],
-                        "cover_url": supplied.get("cover_url"),
-                        "track_count": supplied.get("track_count"),
-                        "release_date": supplied.get("release_date"),
+        try:
+            for source_album_id in album_ids:
+                # One unresolvable album must not abort the batch: the albums
+                # queued ahead of it are already marked "queued" in the DB, and
+                # bailing out here would strand them with no worker started.
+                try:
+                    album = self.db.get_album_by_source_id(source, source_album_id)
+                    if album is None:
+                        # Prefer metadata supplied by the caller (e.g. search
+                        # results already carry title/artist/cover). Only
+                        # round-trip to the streaming service when the caller
+                        # has nothing for us.
+                        supplied = supplied_metadata.get(source_album_id)
+                        if supplied is not None:
+                            meta = {
+                                "title": supplied["title"],
+                                "artist": supplied["artist"],
+                                "cover_url": supplied.get("cover_url"),
+                                "track_count": supplied.get("track_count"),
+                                "release_date": supplied.get("release_date"),
+                            }
+                        else:
+                            meta = await self._fetch_album_metadata(
+                                source, source_album_id
+                            )
+                        album_id = self.db.upsert_album(
+                            source=source,
+                            source_album_id=source_album_id,
+                            title=meta["title"],
+                            artist=meta["artist"],
+                            cover_url=meta.get("cover_url"),
+                            track_count=meta.get("track_count"),
+                            release_date=meta.get("release_date"),
+                            added_to_library_at=datetime.now().isoformat(),
+                        )
+                        album = self.db.get_album(album_id)
+                        if album is None:
+                            logger.warning(
+                                "Failed to create album entry for %s", source_album_id
+                            )
+                            continue
+                        logger.info(
+                            "Auto-created album entry for %s: %s — %s",
+                            source_album_id,
+                            meta["artist"],
+                            meta["title"],
+                        )
+                    item = {
+                        "id": str(uuid.uuid4()),
+                        "album_db_id": album["id"],
+                        "source": source,
+                        "source_album_id": source_album_id,
+                        "title": album["title"],
+                        "artist": album["artist"],
+                        "cover_url": album.get("cover_url"),
+                        "track_count": album.get("track_count", 0),
+                        "tracks_done": 0,
+                        "bytes_done": 0,
+                        "bytes_total": 0,
+                        "speed": 0.0,
+                        "status": "pending",
+                        "force": force,
                     }
-                else:
-                    meta = await self._fetch_album_metadata(source, source_album_id)
-                album_id = self.db.upsert_album(
-                    source=source,
-                    source_album_id=source_album_id,
-                    title=meta["title"],
-                    artist=meta["artist"],
-                    cover_url=meta.get("cover_url"),
-                    track_count=meta.get("track_count"),
-                    release_date=meta.get("release_date"),
-                    added_to_library_at=datetime.now().isoformat(),
-                )
-                album = self.db.get_album(album_id)
-                if album is None:
-                    logger.warning(
-                        "Failed to create album entry for %s", source_album_id
+                    self._queue.append(item)
+                    self.db.update_album_status(album["id"], "queued")
+                    items.append(item)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to enqueue album %s/%s", source, source_album_id
                     )
+                    errors.append(exc)
                     continue
-                logger.info(
-                    "Auto-created album entry for %s: %s — %s",
-                    source_album_id,
-                    meta["artist"],
-                    meta["title"],
-                )
-            item = {
-                "id": str(uuid.uuid4()),
-                "album_db_id": album["id"],
-                "source": source,
-                "source_album_id": source_album_id,
-                "title": album["title"],
-                "artist": album["artist"],
-                "cover_url": album.get("cover_url"),
-                "track_count": album.get("track_count", 0),
-                "tracks_done": 0,
-                "bytes_done": 0,
-                "bytes_total": 0,
-                "speed": 0.0,
-                "status": "pending",
-                "force": force,
-            }
-            self._queue.append(item)
-            self.db.update_album_status(album["id"], "queued")
-            items.append(item)
+        finally:
+            # In a `finally` so whatever did get queued always gets a worker,
+            # even if the loop exits early.
+            if any(q["status"] == "pending" for q in self._queue) and (
+                self._worker_task is None or self._worker_task.done()
+            ):
+                self._worker_task = asyncio.create_task(self._process_queue())
 
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._process_queue())
+        # A batch in which *nothing* could be queued is still a loud failure —
+        # surfacing the first error keeps auth/network problems visible instead
+        # of returning an empty list the UI would read as "nothing to do".
+        if errors and not items:
+            raise errors[0]
         return items
 
     def get_queue(self) -> list[dict]:
@@ -253,7 +278,16 @@ class DownloadService:
             except Exception as e:
                 logger.exception("Download failed for %s", item["title"])
                 item["status"] = "failed"
-                self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                # Persist the failure (with a timestamp, which is what
+                # get_recent_downloads filters on) so the download history
+                # still shows it after a restart. "failed" is not terminal:
+                # enqueue looks albums up by source id, never by status, so
+                # the album stays re-queueable.
+                self.db.update_album_status(
+                    item["album_db_id"],
+                    "failed",
+                    downloaded_at=datetime.now().isoformat(),
+                )
                 await self.event_bus.publish(
                     "download_failed", {"item_id": item["id"], "error": str(e)}
                 )
@@ -458,11 +492,14 @@ class DownloadService:
         item["track_count"] = result.total
         item["tracks_done"] = result.successful
 
-        # Update album metadata in DB with resolved data from download
+        # Update album metadata in DB with resolved data from download.
+        # This is a narrow UPDATE, not an upsert: upsert_album overwrites
+        # cover_url/release_date/label/genre/duration_seconds/quality with the
+        # None of every omitted kwarg, which used to wipe the cover art off
+        # every album the moment its download finished.
         if result.title and result.artist:
-            self.db.upsert_album(
-                source=item["source"],
-                source_album_id=item["source_album_id"],
+            self.db.update_album_resolved_metadata(
+                item["album_db_id"],
                 title=result.title,
                 artist=result.artist,
                 track_count=result.total,

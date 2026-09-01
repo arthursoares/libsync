@@ -44,6 +44,7 @@
       case 'downloading':
         return 'tag-accent';
       case 'partial':
+      case 'failed':
         return 'tag-warning';
       default:
         return 'tag-default';
@@ -61,6 +62,8 @@
         return 'Downloading';
       case 'partial':
         return 'Partial';
+      case 'failed':
+        return 'Failed';
       default:
         return 'Not DL';
     }
