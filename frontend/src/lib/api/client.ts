@@ -82,6 +82,14 @@ export const api = {
     update: (data: Record<string, unknown>) =>
       request<any>('/config', { method: 'PATCH', body: JSON.stringify(data) }),
   },
+  sync: {
+    status: (source: string) => request<any>(`/sync/status/${source}`),
+    run: (source: string, options?: { downloadNew?: boolean }) => {
+      const qs = options?.downloadNew ? '?download_new=true' : '';
+      return request<any>(`/sync/run/${source}${qs}`, { method: 'POST' });
+    },
+    history: (source: string) => request<any[]>(`/sync/history?source=${source}`),
+  },
   auth: {
     status: () => request<any[]>('/auth/status'),
   },

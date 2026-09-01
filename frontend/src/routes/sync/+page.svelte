@@ -16,14 +16,28 @@
   let lastSync = $state<string | null>(null);
   let syncHistory = $state<any[]>([]);
   let syncError = $state('');
+  let connected = $state(true);
+
+  let selectedNew = $state<Set<string | number>>(new Set());
+  let downloadingSelected = $state(false);
+  let downloadSelectedError = $state('');
+
+  // Monotonic token guarding against out-of-order responses when the
+  // user switches source quickly (issue #43): a slower, older
+  // loadSyncStatus() call must not clobber a newer one's results.
+  let reqSeq = 0;
 
   async function loadSyncStatus() {
+    const seq = ++reqSeq;
     loading = true;
     syncError = '';
     try {
-      const diff = await fetch(`/api/sync/status/${source}`).then(r => r.json());
-      newAlbums = (diff.new_albums || []).map((a: any, i: number) => ({
-        id: i,
+      const diff = await api.sync.status(source);
+      if (seq !== reqSeq) return;
+
+      connected = diff.connected !== false;
+      newAlbums = (diff.new_albums || []).map((a: any) => ({
+        id: a.source_album_id,
         title: a.title || 'Unknown',
         artist: a.artist || 'Unknown',
         meta: `${a.quality || 'FLAC'} · ${a.release_date?.slice(0, 4) || ''}`,
@@ -38,7 +52,9 @@
 
       // Get library stats
       const libraryData = await api.library.getAlbums(source, { page_size: '1' });
+      if (seq !== reqSeq) return;
       const downloadedData = await api.library.getAlbums(source, { page_size: '1', status: 'complete' });
+      if (seq !== reqSeq) return;
       stats = {
         inLibrary: libraryData.total || 0,
         downloaded: downloadedData.total || 0,
@@ -47,13 +63,15 @@
       };
 
       // Get sync history
-      const history = await fetch(`/api/sync/history?source=${source}`).then(r => r.json());
+      const history = await api.sync.history(source);
+      if (seq !== reqSeq) return;
       syncHistory = history || [];
     } catch (err) {
+      if (seq !== reqSeq) return;
       console.error('Failed to load sync status', err);
       syncError = err instanceof Error ? err.message : 'Failed to load sync status';
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
@@ -62,7 +80,7 @@
     syncResult = null;
     syncError = '';
     try {
-      const result = await fetch(`/api/sync/run/${source}`, { method: 'POST' }).then(r => r.json());
+      const result = await api.sync.run(source);
       if (result.status === 'failed') {
         syncResult = 'Sync failed';
         syncError = result.error || 'Sync failed';
@@ -77,6 +95,25 @@
     } finally {
       syncing = false;
       setTimeout(() => { syncResult = null; }, 5000);
+    }
+  }
+
+  function handleNewSelectionChange(selected: Set<string | number>) {
+    selectedNew = selected;
+  }
+
+  async function handleDownloadSelected() {
+    if (selectedNew.size === 0) return;
+    downloadingSelected = true;
+    downloadSelectedError = '';
+    try {
+      await api.downloads.enqueue(source, [...selectedNew].map(String));
+      selectedNew = new Set();
+    } catch (err) {
+      console.error('Failed to queue selected downloads', err);
+      downloadSelectedError = err instanceof Error ? err.message : 'Failed to queue downloads';
+    } finally {
+      downloadingSelected = false;
     }
   }
 
@@ -125,62 +162,83 @@
   <div class="error-banner">{syncError}</div>
 {/if}
 
-<div class="stats-row">
-  <div class="stat-card">
-    <div class="stat-label">In Library</div>
-    <div class="stat-value">{stats.inLibrary}</div>
-    <div class="stat-sub">albums on {source}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Downloaded</div>
-    <div class="stat-value" style="color: var(--positive);">{stats.downloaded}</div>
-    <div class="stat-sub">albums local</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">New</div>
-    <div class="stat-value" style="color: var(--pop);">{stats.newCount}</div>
-    <div class="stat-sub">not yet downloaded</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Missing</div>
-    <div class="stat-value" style="color: var(--destructive);">{stats.missing}</div>
-    <div class="stat-sub">removed from library</div>
-  </div>
-</div>
-
-{#if newAlbums.length > 0}
-  <div class="section-title">
-    <span>New in Library</span>
-    <span class="decoration">░▒▓</span>
-  </div>
-  <div style="margin-bottom: var(--space-8);">
-    <SyncDiff
-      label="Added since last sync"
-      icon_color="var(--pop)"
-      items={newAlbums}
-      selectable={true}
-    />
-  </div>
-{/if}
-
-{#if removedAlbums.length > 0}
-  <div class="section-title">
-    <span>Removed from Library</span>
-    <span class="decoration">░▒▓</span>
-  </div>
-  <SyncDiff
-    label="No longer in streaming library"
-    icon_color="var(--destructive)"
-    items={removedAlbums}
-    selectable={false}
-  />
-{/if}
-
-{#if !loading && newAlbums.length === 0 && removedAlbums.length === 0}
+{#if !loading && !connected}
   <div class="empty-state">
-    <span class="empty-icon">═</span>
-    <p class="empty-text">Library is in sync — no changes detected</p>
+    <span class="empty-icon">⚠</span>
+    <p class="empty-text">
+      {source.charAt(0).toUpperCase() + source.slice(1)} is not connected — connect it in Settings to sync
+    </p>
   </div>
+{:else}
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">In Library</div>
+      <div class="stat-value">{stats.inLibrary}</div>
+      <div class="stat-sub">albums on {source}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Downloaded</div>
+      <div class="stat-value" style="color: var(--positive);">{stats.downloaded}</div>
+      <div class="stat-sub">albums local</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">New</div>
+      <div class="stat-value" style="color: var(--pop);">{stats.newCount}</div>
+      <div class="stat-sub">not yet downloaded</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Missing</div>
+      <div class="stat-value" style="color: var(--destructive);">{stats.missing}</div>
+      <div class="stat-sub">removed from library</div>
+    </div>
+  </div>
+
+  {#if newAlbums.length > 0}
+    <div class="section-title">
+      <span>New in Library</span>
+      <div class="section-actions">
+        {#if downloadSelectedError}
+          <span class="sync-result" style="color: var(--destructive);">{downloadSelectedError}</span>
+        {/if}
+        <button
+          class="btn btn-primary btn-sm"
+          onclick={handleDownloadSelected}
+          disabled={selectedNew.size === 0 || downloadingSelected}
+        >
+          {#if downloadingSelected}Queuing...{:else}Download Selected ({selectedNew.size}){/if}
+        </button>
+      </div>
+    </div>
+    <div style="margin-bottom: var(--space-8);">
+      <SyncDiff
+        label="Added since last sync"
+        icon_color="var(--pop)"
+        items={newAlbums}
+        selectable={true}
+        onchange={handleNewSelectionChange}
+      />
+    </div>
+  {/if}
+
+  {#if removedAlbums.length > 0}
+    <div class="section-title">
+      <span>Removed from Library</span>
+      <span class="decoration">░▒▓</span>
+    </div>
+    <SyncDiff
+      label="No longer in streaming library"
+      icon_color="var(--destructive)"
+      items={removedAlbums}
+      selectable={false}
+    />
+  {/if}
+
+  {#if !loading && newAlbums.length === 0 && removedAlbums.length === 0}
+    <div class="empty-state">
+      <span class="empty-icon">═</span>
+      <p class="empty-text">Library is in sync — no changes detected</p>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -197,8 +255,9 @@
   .stat-value { font-size: var(--text-2xl); font-weight: 800; letter-spacing: var(--tracking-tight); }
   .stat-sub { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); letter-spacing: var(--tracking-mono); margin-top: 2px; }
 
-  .section-title { font-size: var(--text-xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--tracking-wide); border-bottom: 2px solid var(--border); padding-bottom: var(--space-2); margin-bottom: var(--space-6); display: flex; justify-content: space-between; }
+  .section-title { font-size: var(--text-xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--tracking-wide); border-bottom: 2px solid var(--border); padding-bottom: var(--space-2); margin-bottom: var(--space-6); display: flex; align-items: center; justify-content: space-between; }
   .decoration { font-family: var(--font-mono); font-weight: 400; color: var(--text-tertiary); font-size: 11px; }
+  .section-actions { display: flex; align-items: center; gap: var(--space-3); text-transform: none; }
 
   .empty-state { display: flex; flex-direction: column; align-items: center; padding: var(--space-16); gap: var(--space-3); }
   .empty-icon { font-size: 48px; color: var(--text-tertiary); opacity: 0.3; }

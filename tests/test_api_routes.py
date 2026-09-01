@@ -124,6 +124,9 @@ class TestSyncRoutes:
         assert "new_albums" in data
         assert "removed_albums" in data
         assert data["source"] == "qobuz"
+        # No client registered for this test app — get_diff should report
+        # the source as disconnected rather than a silently empty diff.
+        assert data["connected"] is False
 
     async def test_sync_history(self, client):
         resp = await client.get("/api/sync/history?source=qobuz")
