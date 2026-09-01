@@ -85,6 +85,66 @@ CREATE TABLE IF NOT EXISTS schema_version (
 """
 
 
+# Shared by upsert_album and upsert_albums so the column list and the
+# ON CONFLICT merge rules are defined in exactly one place (#25).
+_UPSERT_ALBUM_SQL = """INSERT INTO albums
+   (source, source_album_id, title, artist, release_date, label,
+    genre, track_count, duration_seconds, cover_url, quality,
+    bit_depth, sample_rate, added_to_library_at, user_id)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(source, source_album_id, user_id)
+   DO UPDATE SET
+     title=excluded.title, artist=excluded.artist,
+     release_date=excluded.release_date, label=excluded.label,
+     genre=excluded.genre, track_count=excluded.track_count,
+     duration_seconds=excluded.duration_seconds,
+     cover_url=excluded.cover_url, quality=excluded.quality,
+     bit_depth=COALESCE(excluded.bit_depth, albums.bit_depth),
+     sample_rate=COALESCE(excluded.sample_rate, albums.sample_rate),
+     added_to_library_at=COALESCE(
+         excluded.added_to_library_at,
+         albums.added_to_library_at
+     )
+"""
+
+
+def _album_upsert_params(
+    source: str,
+    source_album_id: str,
+    title: str,
+    artist: str,
+    release_date: str | None = None,
+    label: str | None = None,
+    genre: str | None = None,
+    track_count: int | None = None,
+    duration_seconds: int | None = None,
+    cover_url: str | None = None,
+    quality: str | None = None,
+    bit_depth: int | None = None,
+    sample_rate: float | None = None,
+    added_to_library_at: str | None = None,
+    user_id: int = 1,
+) -> tuple:
+    """Build the parameter tuple for `_UPSERT_ALBUM_SQL`, in column order."""
+    return (
+        source,
+        source_album_id,
+        title,
+        artist,
+        release_date,
+        label,
+        genre,
+        track_count,
+        duration_seconds,
+        cover_url,
+        quality,
+        bit_depth,
+        sample_rate,
+        added_to_library_at,
+        user_id,
+    )
+
+
 class AppDatabase:
     """Extended database for the web application."""
 
@@ -203,26 +263,8 @@ class AppDatabase:
     ) -> int:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO albums
-                   (source, source_album_id, title, artist, release_date, label,
-                    genre, track_count, duration_seconds, cover_url, quality,
-                    bit_depth, sample_rate, added_to_library_at, user_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(source, source_album_id, user_id)
-                   DO UPDATE SET
-                     title=excluded.title, artist=excluded.artist,
-                     release_date=excluded.release_date, label=excluded.label,
-                     genre=excluded.genre, track_count=excluded.track_count,
-                     duration_seconds=excluded.duration_seconds,
-                     cover_url=excluded.cover_url, quality=excluded.quality,
-                     bit_depth=COALESCE(excluded.bit_depth, albums.bit_depth),
-                     sample_rate=COALESCE(excluded.sample_rate, albums.sample_rate),
-                     added_to_library_at=COALESCE(
-                         excluded.added_to_library_at,
-                         albums.added_to_library_at
-                     )
-                """,
-                (
+                _UPSERT_ALBUM_SQL,
+                _album_upsert_params(
                     source,
                     source_album_id,
                     title,
@@ -245,6 +287,41 @@ class AppDatabase:
                 (source, source_album_id, user_id),
             ).fetchone()
             return row["id"]
+
+    def upsert_albums(self, rows: list[dict]) -> None:
+        """Upsert many albums in one connection/transaction.
+
+        Runs the same INSERT ... ON CONFLICT statement as `upsert_album`
+        for every row, via `executemany` inside a single `_connect()`
+        block, instead of opening one SQLite connection per album on the
+        event loop (#25). Each dict in `rows` uses the same keyword names
+        as `upsert_album`'s parameters; only `source`, `source_album_id`,
+        `title`, and `artist` are required.
+        """
+        if not rows:
+            return
+        params = [
+            _album_upsert_params(
+                row["source"],
+                row["source_album_id"],
+                row["title"],
+                row["artist"],
+                row.get("release_date"),
+                row.get("label"),
+                row.get("genre"),
+                row.get("track_count"),
+                row.get("duration_seconds"),
+                row.get("cover_url"),
+                row.get("quality"),
+                row.get("bit_depth"),
+                row.get("sample_rate"),
+                row.get("added_to_library_at"),
+                row.get("user_id", 1),
+            )
+            for row in rows
+        ]
+        with self._connect() as conn:
+            conn.executemany(_UPSERT_ALBUM_SQL, params)
 
     def get_albums(
         self,
@@ -339,6 +416,26 @@ class AppDatabase:
                     "UPDATE albums SET download_status=? WHERE id=?",
                     (status, album_id),
                 )
+
+    def reset_transient_download_statuses(self) -> int:
+        """Reset albums stuck in 'queued' or 'downloading' back to
+        'not_downloaded'.
+
+        The download queue is in-memory only (D7 in the architecture
+        contract); a backend restart forgets queued and in-flight items
+        but leaves the corresponding albums' `download_status` untouched,
+        so the UI shows a permanent spinner (#32). Called once at startup
+        in `backend.main.create_app`, right after the database is opened.
+        Does not re-enqueue anything.
+
+        Returns the number of rows reset.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE albums SET download_status = 'not_downloaded'
+                   WHERE download_status IN ('queued', 'downloading')"""
+            )
+            return cursor.rowcount
 
     def update_album_resolved_metadata(
         self,

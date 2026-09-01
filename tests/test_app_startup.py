@@ -1,10 +1,13 @@
 """Test that the FastAPI app starts and serves basic routes."""
 
+import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 from httpx import ASGITransport, AsyncClient
 
 from backend.main import create_app
+from backend.models.database import AppDatabase
 
 
 class TestAppStartup:
@@ -48,3 +51,69 @@ class TestLifespanShutdown:
             pass
 
         fake_client.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+class TestBootRecoversStuckDownloadStatuses:
+    """Regression for #32 (and the restart-recovery test #49 asked for):
+    the download queue is in-memory only, so a `queued`/`downloading` row
+    left behind by a crashed or restarted backend must be normalised back
+    to `not_downloaded` when the app is (re)constructed.
+    """
+
+    def test_restart_resets_queued_and_downloading_albums(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            seed_db = AppDatabase(db_path)
+            queued_id = seed_db.upsert_album("qobuz", "a1", "Queued Album", "Artist")
+            seed_db.update_album_status(queued_id, "queued")
+            downloading_id = seed_db.upsert_album(
+                "qobuz", "a2", "Downloading Album", "Artist"
+            )
+            seed_db.update_album_status(downloading_id, "downloading")
+            complete_id = seed_db.upsert_album(
+                "qobuz", "a3", "Complete Album", "Artist"
+            )
+            seed_db.update_album_status(complete_id, "complete")
+            failed_id = seed_db.upsert_album("qobuz", "a4", "Failed Album", "Artist")
+            seed_db.update_album_status(failed_id, "failed")
+
+            app = create_app(db_path=db_path)
+
+            assert (
+                app.state.db.get_album(queued_id)["download_status"] == "not_downloaded"
+            )
+            assert (
+                app.state.db.get_album(downloading_id)["download_status"]
+                == "not_downloaded"
+            )
+            assert app.state.db.get_album(complete_id)["download_status"] == "complete"
+            assert app.state.db.get_album(failed_id)["download_status"] == "failed"
+        finally:
+            os.unlink(db_path)
+
+    def test_logs_at_info_when_albums_were_reset(self, caplog):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            seed_db = AppDatabase(db_path)
+            album_id = seed_db.upsert_album("qobuz", "a1", "Album", "Artist")
+            seed_db.update_album_status(album_id, "downloading")
+
+            with caplog.at_level("INFO", logger="streamrip"):
+                create_app(db_path=db_path)
+
+            assert "Reset 1 albums stuck in queued/downloading" in caplog.text
+        finally:
+            os.unlink(db_path)
+
+    def test_no_reset_log_when_nothing_stuck(self, caplog):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            with caplog.at_level("INFO", logger="streamrip"):
+                create_app(db_path=db_path)
+
+            assert "stuck in queued/downloading" not in caplog.text
+        finally:
+            os.unlink(db_path)

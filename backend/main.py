@@ -248,6 +248,18 @@ def create_app(db_path: str | None = None) -> FastAPI:
     if db_path is None:
         db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
     db = AppDatabase(db_path)
+
+    # The download queue is in-memory only (D7); a restart forgets
+    # queued/in-flight items but leaves the corresponding albums stuck at
+    # download_status "queued"/"downloading" in the DB (#32). Reset them
+    # here so the UI doesn't show a permanent spinner. Does not re-enqueue.
+    reset_count = db.reset_transient_download_statuses()
+    if reset_count > 0:
+        logger.info(
+            "Reset %d albums stuck in queued/downloading from a previous run",
+            reset_count,
+        )
+
     event_bus = EventBus()
 
     for event_type in (

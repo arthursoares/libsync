@@ -192,6 +192,32 @@ class TestLibrarySDKRefresh:
         assert result["total"] == 2
         assert client.favorites.get_albums.call_count == 2
 
+    async def test_refresh_reports_new_album_ids_via_batch_upsert(self, db, event_bus):
+        """refresh_library must still report total/new/new_album_ids
+        correctly now that it upserts via the batched db.upsert_albums
+        instead of one db.upsert_album call per item (#25)."""
+        db.upsert_album("qobuz", "existing_id", "Old Title", "Old Artist")
+
+        albums = [
+            MockAlbum(id="existing_id", title="Known Album"),
+            MockAlbum(id="new_id", title="New Album"),
+        ]
+        client = make_sdk_client(albums=albums)
+
+        service = LibraryService(db, event_bus, clients={"qobuz": client})
+        result = await service.refresh_library("qobuz")
+
+        assert result["total"] == 2
+        assert result["new"] == 1
+        assert result["new_album_ids"] == ["new_id"]
+
+        db_albums = {a["source_album_id"]: a for a in db.get_albums("qobuz")}
+        assert len(db_albums) == 2
+        assert db_albums["existing_id"]["title"] == "Known Album"
+        assert db_albums["new_id"]["title"] == "New Album"
+        assert db_albums["new_id"]["added_to_library_at"] is not None
+        assert db_albums["existing_id"]["added_to_library_at"] is None
+
 
 class TestLibrarySDKSearch:
     async def test_search_with_sdk_client(self, db, event_bus):
