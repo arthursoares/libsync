@@ -417,6 +417,26 @@ class AppDatabase:
                     (status, album_id),
                 )
 
+    def reset_transient_download_statuses(self) -> int:
+        """Reset albums stuck in 'queued' or 'downloading' back to
+        'not_downloaded'.
+
+        The download queue is in-memory only (D7 in the architecture
+        contract); a backend restart forgets queued and in-flight items
+        but leaves the corresponding albums' `download_status` untouched,
+        so the UI shows a permanent spinner (#32). Called once at startup
+        in `backend.main.create_app`, right after the database is opened.
+        Does not re-enqueue anything.
+
+        Returns the number of rows reset.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE albums SET download_status = 'not_downloaded'
+                   WHERE download_status IN ('queued', 'downloading')"""
+            )
+            return cursor.rowcount
+
     def update_album_resolved_metadata(
         self,
         album_id: int,

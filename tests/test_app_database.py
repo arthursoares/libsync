@@ -183,6 +183,36 @@ class TestUpsertAlbums:
         assert db.count_albums("qobuz") == 0
 
 
+class TestResetTransientDownloadStatuses:
+    def test_resets_only_queued_and_downloading(self, db):
+        ids = {}
+        for source_album_id, status in [
+            ("a1", "queued"),
+            ("a2", "downloading"),
+            ("a3", "complete"),
+            ("a4", "failed"),
+            ("a5", "not_downloaded"),
+        ]:
+            album_id = db.upsert_album("qobuz", source_album_id, "T", "A")
+            ids[source_album_id] = album_id
+            if status != "not_downloaded":
+                db.update_album_status(album_id, status)
+
+        count = db.reset_transient_download_statuses()
+        assert count == 2
+
+        assert db.get_album(ids["a1"])["download_status"] == "not_downloaded"
+        assert db.get_album(ids["a2"])["download_status"] == "not_downloaded"
+        assert db.get_album(ids["a3"])["download_status"] == "complete"
+        assert db.get_album(ids["a4"])["download_status"] == "failed"
+        assert db.get_album(ids["a5"])["download_status"] == "not_downloaded"
+
+    def test_returns_zero_when_nothing_stuck(self, db):
+        album_id = db.upsert_album("qobuz", "a1", "T", "A")
+        db.update_album_status(album_id, "complete")
+        assert db.reset_transient_download_statuses() == 0
+
+
 class TestTracks:
     def test_upsert_and_get_tracks(self, db):
         album_id = db.upsert_album("qobuz", "a1", "Album", "Artist")
