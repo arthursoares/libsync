@@ -32,6 +32,11 @@
   const PAGE_SIZE = 60;
   let viewMode = $state<'grid' | 'table'>('grid');
 
+  // Monotonic token guarding against out-of-order responses (issue #43):
+  // a slower, older fetchAlbums() call must not clobber a newer one's
+  // results when source/sort/filter change in quick succession.
+  let reqSeq = 0;
+
   // Library filter (local DB search)
   let librarySearch = $state('');
   let libraryDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -73,6 +78,7 @@
   }
 
   async function fetchAlbums(append = false) {
+    const seq = ++reqSeq;
     if (append) {
       loadingMore = true;
     } else {
@@ -88,6 +94,7 @@
       if (filter !== 'all') params['status'] = filter;
       if (librarySearch.trim()) params['search'] = librarySearch.trim();
       const data = await api.library.getAlbums(source, params);
+      if (seq !== reqSeq) return;
       if (append) {
         $albums = [...$albums, ...data.albums];
       } else {
@@ -97,8 +104,10 @@
     } catch (err) {
       console.error('Failed to load albums', err);
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (seq === reqSeq) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 

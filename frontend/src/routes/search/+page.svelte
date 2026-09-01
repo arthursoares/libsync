@@ -22,6 +22,11 @@
   let searchError = $state('');
   const PAGE_SIZE = 60;
 
+  // Monotonic token guarding against out-of-order responses (issue #43):
+  // a slower, older runSearch() call must not clobber a newer one's
+  // results when source or query change in quick succession.
+  let reqSeq = 0;
+
   // ── UI state ──
   let viewMode = $state<'grid' | 'table'>('grid');
   let detailOpen = $state(false);
@@ -76,12 +81,14 @@
   // ── Search execution ──
   async function runSearch(query: string, append = false) {
     if (!query.trim()) {
+      reqSeq++;
       results = [];
       total = 0;
       hasSearched = false;
       searchError = '';
       return;
     }
+    const seq = ++reqSeq;
     if (append) {
       loadingMore = true;
     } else {
@@ -96,6 +103,7 @@
         page: String(currentPage),
         page_size: String(PAGE_SIZE),
       });
+      if (seq !== reqSeq) return;
       // Backend now returns {albums, total, limit, offset}
       // Old shape compat: if it's an array, treat it as a single page
       const incoming = Array.isArray(data) ? data : (data.albums ?? []);
@@ -103,6 +111,7 @@
       results = append ? [...results, ...incoming] : incoming;
       total = incomingTotal;
     } catch (err) {
+      if (seq !== reqSeq) return;
       console.error('Search failed', err);
       searchError = err instanceof Error ? err.message : 'Search failed';
       if (!append) {
@@ -110,8 +119,10 @@
         total = 0;
       }
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (seq === reqSeq) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 

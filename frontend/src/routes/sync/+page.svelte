@@ -18,11 +18,18 @@
   let syncError = $state('');
   let connected = $state(true);
 
+  // Monotonic token guarding against out-of-order responses (issue #43):
+  // a slower, older loadSyncStatus() call must not clobber a newer one's
+  // results when the user switches source in quick succession.
+  let reqSeq = 0;
+
   async function loadSyncStatus() {
+    const seq = ++reqSeq;
     loading = true;
     syncError = '';
     try {
       const diff = await api.sync.status(source);
+      if (seq !== reqSeq) return;
 
       connected = diff.connected !== false;
       newAlbums = (diff.new_albums || []).map((a: any, i: number) => ({
@@ -41,7 +48,9 @@
 
       // Get library stats
       const libraryData = await api.library.getAlbums(source, { page_size: '1' });
+      if (seq !== reqSeq) return;
       const downloadedData = await api.library.getAlbums(source, { page_size: '1', status: 'complete' });
+      if (seq !== reqSeq) return;
       stats = {
         inLibrary: libraryData.total || 0,
         downloaded: downloadedData.total || 0,
@@ -51,12 +60,14 @@
 
       // Get sync history
       const history = await api.sync.history(source);
+      if (seq !== reqSeq) return;
       syncHistory = history || [];
     } catch (err) {
+      if (seq !== reqSeq) return;
       console.error('Failed to load sync status', err);
       syncError = err instanceof Error ? err.message : 'Failed to load sync status';
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
