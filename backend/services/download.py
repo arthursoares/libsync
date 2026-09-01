@@ -457,8 +457,15 @@ class DownloadService:
         # list at emit time.
         track_statuses_by_num: dict[int, dict] = {}
         last_emit = [0.0]
-        # Per-track download start time, for per-track speed calculations
-        track_start_times: dict[int, float] = {}
+        # Per-track byte counters keyed by track number.  Each callback
+        # carries *that* track's absolute counters, so writing them straight
+        # onto the shared item made the album totals jump between whichever
+        # of the concurrently downloading tracks reported last.  Keep them
+        # apart and publish the sums.
+        track_bytes: dict[int, tuple[int, int]] = {}
+        # When the album's first track started — the album-wide rate is
+        # measured from there, not per track.
+        album_start_time: list[float | None] = [None]
 
         def _render_statuses() -> list[dict]:
             return [
@@ -498,21 +505,27 @@ class DownloadService:
                 "status": "downloading",
                 "progress": 0,
             }
-            track_start_times[num] = _time.monotonic()
+            if album_start_time[0] is None:
+                album_start_time[0] = _time.monotonic()
             _emit_progress()
 
         def on_track_progress(num: int, bytes_done: int, bytes_total: int):
-            queue_item["bytes_done"] = bytes_done
-            queue_item["bytes_total"] = bytes_total
+            track_bytes[num] = (bytes_done, bytes_total)
+            album_done = sum(done for done, _ in track_bytes.values())
+            queue_item["bytes_done"] = album_done
+            queue_item["bytes_total"] = sum(total for _, total in track_bytes.values())
 
             status = track_statuses_by_num.get(num)
             if status is not None and bytes_total > 0:
                 status["progress"] = min(100, round(bytes_done / bytes_total * 100))
 
-            # Speed for *this* track (per-track, not the album-wide last call)
-            start = track_start_times.get(num, _time.monotonic())
+            # One album-wide rate: everything downloaded so far over the time
+            # since the album's first track started.
+            start = album_start_time[0]
+            if start is None:
+                start = album_start_time[0] = _time.monotonic()
             elapsed = _time.monotonic() - start
-            speed = (bytes_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+            speed = (album_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
             queue_item["speed"] = round(speed, 2)
 
             # Throttle WebSocket events to every 0.5s
