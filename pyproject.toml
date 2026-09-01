@@ -20,7 +20,10 @@ uvicorn = ">=0.29"
 httpx = ">=0.27"
 websockets = "*"
 # Shared HTTP / async runtime (also pulled in transitively by the SDKs)
-aiohttp = "^3.9"
+# 3.11.13 was yanked from PyPI (transport regression, aio-libs/aiohttp#10617);
+# pinned to the newest non-yanked release. Keep the pin: the SDKs declare
+# aiohttp>=3.9 and take whatever the venv has installed.
+aiohttp = "^3.14"
 # The qobuz and tidal SDKs are installed from the sdks/qobuz_api_client
 # submodule — see `make deps`. They carry their own dependencies (mutagen,
 # aiolimiter, pycryptodomex, aiofiles).
