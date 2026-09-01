@@ -11,18 +11,22 @@
     icon_color: string;
     items: Album[];
     selectable?: boolean;
+    onchange?: (selected: Set<string | number>) => void;
   }
 
-  let { label, icon_color, items, selectable = false }: Props = $props();
+  let { label, icon_color, items, selectable = false, onchange }: Props = $props();
 
   // Track checked state per item id — initialised via $derived so it
   // re-runs when the `items` prop reference changes (Svelte 5 runes rule).
   let checkedIds = $derived(new Set(items.map((a) => a.id)));
   let checked = $state<Set<string | number>>(new Set<string | number>());
 
-  // Seed on first render and whenever items change.
+  // Seed on first render and whenever items change. Items start selected,
+  // so notify the consumer here too — otherwise its selection state would
+  // start empty while every row renders checked.
   $effect(() => {
     checked = new Set(checkedIds);
+    onchange?.(checked);
   });
 
   function toggle(id: string | number) {
@@ -34,6 +38,7 @@
       next.add(id);
     }
     checked = next;
+    onchange?.(checked);
   }
 </script>
 

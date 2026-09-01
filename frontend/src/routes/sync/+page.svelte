@@ -18,9 +18,13 @@
   let syncError = $state('');
   let connected = $state(true);
 
-  // Monotonic token guarding against out-of-order responses (issue #43):
-  // a slower, older loadSyncStatus() call must not clobber a newer one's
-  // results when the user switches source in quick succession.
+  let selectedNew = $state<Set<string | number>>(new Set());
+  let downloadingSelected = $state(false);
+  let downloadSelectedError = $state('');
+
+  // Monotonic token guarding against out-of-order responses when the
+  // user switches source quickly (issue #43): a slower, older
+  // loadSyncStatus() call must not clobber a newer one's results.
   let reqSeq = 0;
 
   async function loadSyncStatus() {
@@ -32,8 +36,8 @@
       if (seq !== reqSeq) return;
 
       connected = diff.connected !== false;
-      newAlbums = (diff.new_albums || []).map((a: any, i: number) => ({
-        id: i,
+      newAlbums = (diff.new_albums || []).map((a: any) => ({
+        id: a.source_album_id,
         title: a.title || 'Unknown',
         artist: a.artist || 'Unknown',
         meta: `${a.quality || 'FLAC'} · ${a.release_date?.slice(0, 4) || ''}`,
@@ -91,6 +95,25 @@
     } finally {
       syncing = false;
       setTimeout(() => { syncResult = null; }, 5000);
+    }
+  }
+
+  function handleNewSelectionChange(selected: Set<string | number>) {
+    selectedNew = selected;
+  }
+
+  async function handleDownloadSelected() {
+    if (selectedNew.size === 0) return;
+    downloadingSelected = true;
+    downloadSelectedError = '';
+    try {
+      await api.downloads.enqueue(source, [...selectedNew].map(String));
+      selectedNew = new Set();
+    } catch (err) {
+      console.error('Failed to queue selected downloads', err);
+      downloadSelectedError = err instanceof Error ? err.message : 'Failed to queue downloads';
+    } finally {
+      downloadingSelected = false;
     }
   }
 
@@ -173,7 +196,18 @@
   {#if newAlbums.length > 0}
     <div class="section-title">
       <span>New in Library</span>
-      <span class="decoration">░▒▓</span>
+      <div class="section-actions">
+        {#if downloadSelectedError}
+          <span class="sync-result" style="color: var(--destructive);">{downloadSelectedError}</span>
+        {/if}
+        <button
+          class="btn btn-primary btn-sm"
+          onclick={handleDownloadSelected}
+          disabled={selectedNew.size === 0 || downloadingSelected}
+        >
+          {#if downloadingSelected}Queuing...{:else}Download Selected ({selectedNew.size}){/if}
+        </button>
+      </div>
     </div>
     <div style="margin-bottom: var(--space-8);">
       <SyncDiff
@@ -181,6 +215,7 @@
         icon_color="var(--pop)"
         items={newAlbums}
         selectable={true}
+        onchange={handleNewSelectionChange}
       />
     </div>
   {/if}
@@ -220,8 +255,9 @@
   .stat-value { font-size: var(--text-2xl); font-weight: 800; letter-spacing: var(--tracking-tight); }
   .stat-sub { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); letter-spacing: var(--tracking-mono); margin-top: 2px; }
 
-  .section-title { font-size: var(--text-xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--tracking-wide); border-bottom: 2px solid var(--border); padding-bottom: var(--space-2); margin-bottom: var(--space-6); display: flex; justify-content: space-between; }
+  .section-title { font-size: var(--text-xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--tracking-wide); border-bottom: 2px solid var(--border); padding-bottom: var(--space-2); margin-bottom: var(--space-6); display: flex; align-items: center; justify-content: space-between; }
   .decoration { font-family: var(--font-mono); font-weight: 400; color: var(--text-tertiary); font-size: 11px; }
+  .section-actions { display: flex; align-items: center; gap: var(--space-3); text-transform: none; }
 
   .empty-state { display: flex; flex-direction: column; align-items: center; padding: var(--space-16); gap: var(--space-3); }
   .empty-icon { font-size: 48px; color: var(--text-tertiary); opacity: 0.3; }
