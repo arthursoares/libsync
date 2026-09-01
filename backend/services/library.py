@@ -1,5 +1,6 @@
 """Library service — fetches and caches streaming library state."""
 
+import asyncio
 import logging
 from typing import ClassVar
 
@@ -169,6 +170,7 @@ class LibraryService:
         now = datetime.now().isoformat()
         new_count = 0
         new_album_ids: list[str] = []
+        rows: list[dict] = []
         for item in all_items:
             album_resp = self._extract_album_data(source, item)
             if album_resp is None:
@@ -178,7 +180,11 @@ class LibraryService:
                 new_count += 1
                 new_album_ids.append(album_resp["source_album_id"])
                 album_resp["added_to_library_at"] = now
-            self.db.upsert_album(**album_resp)
+            rows.append(album_resp)
+
+        # Batch every upsert into one connection/transaction off the event
+        # loop instead of one SQLite connection per album (#25).
+        await asyncio.to_thread(self.db.upsert_albums, rows)
 
         await self.event_bus.publish(
             "library_updated",

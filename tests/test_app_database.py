@@ -83,6 +83,106 @@ class TestAlbums:
         assert db.count_albums("tidal") == 1
 
 
+class TestUpsertAlbums:
+    def test_batch_upsert_matches_sequential_upserts(self, db):
+        """upsert_albums(rows) must produce the same rows (same ids, same
+        values) as calling upsert_album once per row (#25)."""
+        rows = [
+            {
+                "source": "qobuz",
+                "source_album_id": "a1",
+                "title": "Album A",
+                "artist": "Artist A",
+                "track_count": 10,
+            },
+            {
+                "source": "qobuz",
+                "source_album_id": "a2",
+                "title": "Album B",
+                "artist": "Artist B",
+                "track_count": 12,
+            },
+            {
+                "source": "qobuz",
+                "source_album_id": "a3",
+                "title": "Album C",
+                "artist": "Artist C",
+                "track_count": 8,
+            },
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            sequential_path = f.name
+        sequential_db = AppDatabase(sequential_path)
+        try:
+            for row in rows:
+                sequential_db.upsert_album(**row)
+
+            db.upsert_albums(rows)
+
+            for row in rows:
+                batch_album = db.get_album_by_source_id(
+                    row["source"], row["source_album_id"]
+                )
+                sequential_album = sequential_db.get_album_by_source_id(
+                    row["source"], row["source_album_id"]
+                )
+                assert batch_album is not None
+                assert sequential_album is not None
+                assert batch_album["id"] == sequential_album["id"]
+                assert batch_album["title"] == sequential_album["title"] == row["title"]
+                assert (
+                    batch_album["artist"] == sequential_album["artist"] == row["artist"]
+                )
+                assert (
+                    batch_album["track_count"]
+                    == sequential_album["track_count"]
+                    == row["track_count"]
+                )
+        finally:
+            os.unlink(sequential_path)
+
+    def test_batch_upsert_updates_existing_album(self, db):
+        db.upsert_album("qobuz", "a1", "Old Title", "Artist")
+        db.upsert_albums(
+            [
+                {
+                    "source": "qobuz",
+                    "source_album_id": "a1",
+                    "title": "New Title",
+                    "artist": "Artist",
+                }
+            ]
+        )
+        album = db.get_album_by_source_id("qobuz", "a1")
+        assert album["title"] == "New Title"
+
+    def test_batch_upsert_preserves_added_to_library_at_when_omitted(self, db):
+        db.upsert_album(
+            "qobuz",
+            "a1",
+            "Old Title",
+            "Artist",
+            added_to_library_at="2026-04-01T10:00:00",
+        )
+        db.upsert_albums(
+            [
+                {
+                    "source": "qobuz",
+                    "source_album_id": "a1",
+                    "title": "New Title",
+                    "artist": "Artist",
+                }
+            ]
+        )
+        album = db.get_album_by_source_id("qobuz", "a1")
+        assert album["added_to_library_at"] == "2026-04-01T10:00:00"
+
+    def test_batch_upsert_empty_list_is_noop(self, db):
+        db.upsert_albums([])
+        assert db.count_albums("qobuz") == 0
+
+
 class TestTracks:
     def test_upsert_and_get_tracks(self, db):
         album_id = db.upsert_album("qobuz", "a1", "Album", "Artist")
