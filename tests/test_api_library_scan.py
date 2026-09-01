@@ -108,6 +108,29 @@ class TestMarkDownloaded:
         )
         assert resp.status_code == 200
 
+    async def test_lowercase_sentinel_config_still_writes_sentinel(
+        self, client, app, album_id, tmp_path
+    ):
+        """Regression for #29: the config API always persists booleans as
+        "True" (str(True)), but a value stored as lowercase "true" — e.g.
+        by a future writer, or a hand-edited DB — must not silently disable
+        sentinel writes via a case-sensitive `== "True"` comparison.
+        """
+        downloads_root = tmp_path / "music"
+        (downloads_root / "Album").mkdir(parents=True)
+        app.state.db.set_config("downloads_path", str(downloads_root))
+        # Bypass the config API (which always writes "True") to simulate a
+        # lowercase-stored value.
+        app.state.db.set_config("scan_sentinel_write_enabled", "true")
+
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": str(downloads_root / "Album")},
+        )
+        assert resp.status_code == 200
+        sentinel = downloads_root / "Album" / ".streamrip.json"
+        assert sentinel.exists()
+
 
 class TestScanFuzzy:
     async def test_starts_job_and_returns_id(self, client, app, album_id, tmp_path):

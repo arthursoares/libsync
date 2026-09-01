@@ -44,6 +44,34 @@ class TestLibraryRoutes:
         assert data["title"] == "Test"
         assert len(data["tracks"]) == 1
 
+    async def test_negative_page_size_does_not_return_entire_table(self, client, app):
+        for i in range(5):
+            app.state.db.upsert_album("qobuz", f"a{i}", f"Test {i}", "Artist")
+        resp = await client.get(
+            "/api/library/qobuz/albums", params={"page_size": -1, "page": 0}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # page_size=-1 must clamp to 1 (max(1, min(-1, 200))), not be
+        # treated as SQLite's "unbounded LIMIT" sentinel that would return
+        # all 5 rows; page=0 must clamp to page 1. `total` reflects the
+        # full library regardless of pagination.
+        assert data["page"] == 1
+        assert data["page_size"] == 1
+        assert len(data["albums"]) == 1
+        assert data["total"] == 5
+
+    async def test_page_size_clamped_to_max(self, client, app):
+        for i in range(3):
+            app.state.db.upsert_album("qobuz", f"b{i}", f"Test {i}", "Artist")
+        resp = await client.get(
+            "/api/library/qobuz/albums", params={"page_size": 10000}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["page_size"] == 200
+        assert data["total"] == 3
+
 
 class TestDownloadRoutes:
     async def test_get_empty_queue(self, client):

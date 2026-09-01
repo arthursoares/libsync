@@ -257,6 +257,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         "sync_started",
         "sync_complete",
         "library_updated",
+        "album_status_changed",
         "token_expired",
     ):
 
@@ -308,8 +309,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
         # Stop auto-sync before shutting down
         sync_service.stop_auto_sync()
 
-        # Cleanup sessions
-        for client in clients.values():
+        # Cleanup sessions — use the live reference, not the captured
+        # `clients` local, since `_reload_clients` swaps in a new dict on
+        # `app.state._clients_ref` after credential hot-reload (see
+        # backend/api/config.py:_reload_clients). Closing the stale local
+        # would re-close already-closed sessions and leak the current ones.
+        for client in app.state._clients_ref.values():
             try:
                 await client.__aexit__(None, None, None)
             except Exception:
