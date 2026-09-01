@@ -16,12 +16,15 @@
   let lastSync = $state<string | null>(null);
   let syncHistory = $state<any[]>([]);
   let syncError = $state('');
+  let connected = $state(true);
 
   async function loadSyncStatus() {
     loading = true;
     syncError = '';
     try {
-      const diff = await fetch(`/api/sync/status/${source}`).then(r => r.json());
+      const diff = await api.sync.status(source);
+
+      connected = diff.connected !== false;
       newAlbums = (diff.new_albums || []).map((a: any, i: number) => ({
         id: i,
         title: a.title || 'Unknown',
@@ -47,7 +50,7 @@
       };
 
       // Get sync history
-      const history = await fetch(`/api/sync/history?source=${source}`).then(r => r.json());
+      const history = await api.sync.history(source);
       syncHistory = history || [];
     } catch (err) {
       console.error('Failed to load sync status', err);
@@ -62,7 +65,7 @@
     syncResult = null;
     syncError = '';
     try {
-      const result = await fetch(`/api/sync/run/${source}`, { method: 'POST' }).then(r => r.json());
+      const result = await api.sync.run(source);
       if (result.status === 'failed') {
         syncResult = 'Sync failed';
         syncError = result.error || 'Sync failed';
@@ -125,62 +128,71 @@
   <div class="error-banner">{syncError}</div>
 {/if}
 
-<div class="stats-row">
-  <div class="stat-card">
-    <div class="stat-label">In Library</div>
-    <div class="stat-value">{stats.inLibrary}</div>
-    <div class="stat-sub">albums on {source}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Downloaded</div>
-    <div class="stat-value" style="color: var(--positive);">{stats.downloaded}</div>
-    <div class="stat-sub">albums local</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">New</div>
-    <div class="stat-value" style="color: var(--pop);">{stats.newCount}</div>
-    <div class="stat-sub">not yet downloaded</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Missing</div>
-    <div class="stat-value" style="color: var(--destructive);">{stats.missing}</div>
-    <div class="stat-sub">removed from library</div>
-  </div>
-</div>
-
-{#if newAlbums.length > 0}
-  <div class="section-title">
-    <span>New in Library</span>
-    <span class="decoration">░▒▓</span>
-  </div>
-  <div style="margin-bottom: var(--space-8);">
-    <SyncDiff
-      label="Added since last sync"
-      icon_color="var(--pop)"
-      items={newAlbums}
-      selectable={true}
-    />
-  </div>
-{/if}
-
-{#if removedAlbums.length > 0}
-  <div class="section-title">
-    <span>Removed from Library</span>
-    <span class="decoration">░▒▓</span>
-  </div>
-  <SyncDiff
-    label="No longer in streaming library"
-    icon_color="var(--destructive)"
-    items={removedAlbums}
-    selectable={false}
-  />
-{/if}
-
-{#if !loading && newAlbums.length === 0 && removedAlbums.length === 0}
+{#if !loading && !connected}
   <div class="empty-state">
-    <span class="empty-icon">═</span>
-    <p class="empty-text">Library is in sync — no changes detected</p>
+    <span class="empty-icon">⚠</span>
+    <p class="empty-text">
+      {source.charAt(0).toUpperCase() + source.slice(1)} is not connected — connect it in Settings to sync
+    </p>
   </div>
+{:else}
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">In Library</div>
+      <div class="stat-value">{stats.inLibrary}</div>
+      <div class="stat-sub">albums on {source}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Downloaded</div>
+      <div class="stat-value" style="color: var(--positive);">{stats.downloaded}</div>
+      <div class="stat-sub">albums local</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">New</div>
+      <div class="stat-value" style="color: var(--pop);">{stats.newCount}</div>
+      <div class="stat-sub">not yet downloaded</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Missing</div>
+      <div class="stat-value" style="color: var(--destructive);">{stats.missing}</div>
+      <div class="stat-sub">removed from library</div>
+    </div>
+  </div>
+
+  {#if newAlbums.length > 0}
+    <div class="section-title">
+      <span>New in Library</span>
+      <span class="decoration">░▒▓</span>
+    </div>
+    <div style="margin-bottom: var(--space-8);">
+      <SyncDiff
+        label="Added since last sync"
+        icon_color="var(--pop)"
+        items={newAlbums}
+        selectable={true}
+      />
+    </div>
+  {/if}
+
+  {#if removedAlbums.length > 0}
+    <div class="section-title">
+      <span>Removed from Library</span>
+      <span class="decoration">░▒▓</span>
+    </div>
+    <SyncDiff
+      label="No longer in streaming library"
+      icon_color="var(--destructive)"
+      items={removedAlbums}
+      selectable={false}
+    />
+  {/if}
+
+  {#if !loading && newAlbums.length === 0 && removedAlbums.length === 0}
+    <div class="empty-state">
+      <span class="empty-icon">═</span>
+      <p class="empty-text">Library is in sync — no changes detected</p>
+    </div>
+  {/if}
 {/if}
 
 <style>

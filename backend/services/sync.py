@@ -38,6 +38,7 @@ class SyncService:
                 "removed_albums": [],
                 "source": source,
                 "last_sync": None,
+                "connected": False,
             }
 
         all_items = await self.library_service.fetch_all_favorites(source, client)
@@ -71,6 +72,7 @@ class SyncService:
             "removed_albums": removed_albums,
             "source": source,
             "last_sync": last_sync,
+            "connected": True,
         }
 
     async def run_sync(self, source: str, download_new: bool = False) -> dict:
