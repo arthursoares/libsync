@@ -2,10 +2,10 @@ name: Tests
 
 on:
   push:
-    branches: [main, dev, feature/*]
+    branches: [main, 'feature/**', 'feat/**', 'fix/**', 'chore/**', 'test/**']
     tags: ['v*']
   pull_request:
-    branches: [main, dev]
+    branches: [main]
 
 jobs:
   backend-tests:
