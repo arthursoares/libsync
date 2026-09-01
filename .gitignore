@@ -21,6 +21,7 @@ StreamripDownloads
 /.mypy_cache
 .DS_Store
 pyrightconfig.json
+.venv/
 
 # Build and distribution files
 *.spec
