@@ -278,7 +278,16 @@ class DownloadService:
             except Exception as e:
                 logger.exception("Download failed for %s", item["title"])
                 item["status"] = "failed"
-                self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                # Persist the failure (with a timestamp, which is what
+                # get_recent_downloads filters on) so the download history
+                # still shows it after a restart. "failed" is not terminal:
+                # enqueue looks albums up by source id, never by status, so
+                # the album stays re-queueable.
+                self.db.update_album_status(
+                    item["album_db_id"],
+                    "failed",
+                    downloaded_at=datetime.now().isoformat(),
+                )
                 await self.event_bus.publish(
                     "download_failed", {"item_id": item["id"], "error": str(e)}
                 )

@@ -2,8 +2,8 @@
 
 When ``result.success_rate < 0.8``, the service raises ``RuntimeError``
 which propagates out of ``_download_album`` and is caught by
-``_process_queue``, marking the queue item as ``failed`` and reverting
-the album DB row to ``not_downloaded``.
+``_process_queue``, marking the queue item ``failed`` and persisting
+``failed`` (plus a timestamp) on the album DB row.
 
 These tests inject a fake ``qobuz.AlbumDownloader`` so we never touch
 the network or run the real download pipeline — we just verify the
@@ -282,7 +282,7 @@ def _build_queue_item_in_place(service, db, source: str, source_album_id: str):
 class TestProcessQueueHandlesFailure:
     async def test_failed_download_marks_queue_item_failed(self, db, event_bus):
         """When _download_album raises, _process_queue must mark the item
-        as failed and revert the album DB row to not_downloaded."""
+        as failed and persist 'failed' on the album DB row."""
         result = FakeAlbumResult(
             total=10,
             successful=2,
@@ -308,9 +308,11 @@ class TestProcessQueueHandlesFailure:
         failed_items = [q for q in queue if q["id"] == item["id"]]
         assert failed_items[0]["status"] == "failed"
 
-        # And the album DB row should have been reverted to not_downloaded
+        # And the album DB row should record the failure, with a timestamp so
+        # get_recent_downloads still finds it after a restart.
         album_after = db.get_album(db_id)
-        assert album_after["download_status"] == "not_downloaded"
+        assert album_after["download_status"] == "failed"
+        assert album_after["downloaded_at"] is not None
 
     async def test_successful_download_marks_queue_item_complete(self, db, event_bus):
         """A 100% successful download must mark the queue item complete
@@ -425,3 +427,63 @@ class TestCompletedDownloadPreservesMetadata:
         assert album["quality"] == "FLAC 24/96kHz"
         assert album["bit_depth"] == 24
         assert album["added_to_library_at"] == "2026-04-01T10:00:00"
+
+
+# ---------------------------------------------------------------------------
+# A failed download must survive a restart and stay re-queueable
+# ---------------------------------------------------------------------------
+
+
+class TestFailedDownloadHistory:
+    async def test_failed_download_appears_in_recent_downloads(self, db, event_bus):
+        """get_recent_downloads filters on download_status IN ('complete',
+        'failed') AND downloaded_at IS NOT NULL — the failure path has to
+        satisfy both halves or the history is empty after a restart."""
+        result = FakeAlbumResult(
+            total=10,
+            successful=0,
+            tracks=[
+                FakeTrackResult(track_id=i, title=f"T{i}", success=False)
+                for i in range(10)
+            ],
+        )
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path="/tmp"
+        )
+        _item, db_id = _build_queue_item_in_place(service, db, "qobuz", "history-fail")
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            await service._process_queue()
+
+        history = db.get_recent_downloads()
+        assert [h["id"] for h in history] == [db_id]
+        assert history[0]["download_status"] == "failed"
+
+    async def test_failed_album_can_be_re_enqueued(self, db, event_bus):
+        """'failed' must not be terminal: enqueue looks albums up by source
+        id, never by status, so a retry has to queue normally."""
+        result = FakeAlbumResult(
+            total=10,
+            successful=0,
+            tracks=[
+                FakeTrackResult(track_id=i, title=f"T{i}", success=False)
+                for i in range(10)
+            ],
+        )
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path="/tmp"
+        )
+        _item, db_id = _build_queue_item_in_place(service, db, "qobuz", "retry-me")
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            await service._process_queue()
+        assert db.get_album(db_id)["download_status"] == "failed"
+
+        items = await service.enqueue("qobuz", ["retry-me"])
+        assert len(items) == 1
+        assert items[0]["album_db_id"] == db_id
+        assert db.get_album(db_id)["download_status"] == "queued"
