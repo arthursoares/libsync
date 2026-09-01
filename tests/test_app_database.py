@@ -105,6 +105,24 @@ class TestTracks:
         assert tracks[0]["download_status"] == "complete"
         assert tracks[0]["file_path"] == "/music/track.flac"
 
+    def test_update_track_status_preserves_file_metadata(self, db):
+        """DownloadService updates only the status, so the file metadata a
+        previous call recorded must not be NULLed out."""
+        album_id = db.upsert_album("qobuz", "a1", "Album", "Artist")
+        track_id = db.upsert_track(album_id, "t1", "Track", "Artist")
+        db.update_track_status(
+            track_id, "complete", "/music/track.flac", "FLAC", 24, 96000
+        )
+
+        db.update_track_status(track_id, "complete")
+
+        track = db.get_tracks(album_id)[0]
+        assert track["download_status"] == "complete"
+        assert track["file_path"] == "/music/track.flac"
+        assert track["format"] == "FLAC"
+        assert track["bit_depth"] == 24
+        assert track["sample_rate"] == 96000
+
 
 class TestSyncRuns:
     def test_create_and_complete_sync_run(self, db):
@@ -148,3 +166,31 @@ class TestConfig:
         db.set_config("key", "old")
         db.set_config("key", "new")
         assert db.get_config("key") == "new"
+
+
+class TestStatusFilterSentinel:
+    def test_count_albums_treats_all_as_no_filter(self, db):
+        """get_albums skips the filter for "all"; count_albums used to
+        apply download_status = 'all', so pagination totals read 0."""
+        db.upsert_album("qobuz", "a1", "A", "B")
+        db.upsert_album("qobuz", "a2", "C", "D")
+        db.update_album_status(
+            db.get_album_by_source_id("qobuz", "a1")["id"], "complete"
+        )
+
+        assert len(db.get_albums("qobuz", status="all")) == 2
+        assert db.count_albums("qobuz", status="all") == 2
+
+    def test_helpers_agree_for_every_status(self, db):
+        db.upsert_album("qobuz", "a1", "A", "B")
+        db.upsert_album("qobuz", "a2", "C", "D")
+        db.upsert_album("qobuz", "a3", "E", "F")
+        db.update_album_status(
+            db.get_album_by_source_id("qobuz", "a1")["id"], "complete"
+        )
+        db.update_album_status(db.get_album_by_source_id("qobuz", "a2")["id"], "failed")
+
+        for status in (None, "all", "complete", "failed", "not_downloaded", "queued"):
+            assert db.count_albums("qobuz", status=status) == len(
+                db.get_albums("qobuz", status=status)
+            ), status

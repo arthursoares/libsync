@@ -390,7 +390,9 @@ class AppDatabase:
     ) -> int:
         conditions = ["source = ?", "user_id = ?"]
         params: list = [source, user_id]
-        if status:
+        # "all" is the no-filter sentinel; it must be interpreted exactly as
+        # get_albums does, or pagination totals read 0 for a page of rows.
+        if status and status != "all":
             conditions.append("download_status = ?")
             params.append(status)
         if search:
@@ -466,10 +468,16 @@ class AppDatabase:
         bit_depth: int | None = None,
         sample_rate: int | None = None,
     ):
+        # The metadata columns are COALESCEd so a status-only call (the sole
+        # caller in DownloadService passes just a status) doesn't NULL the
+        # file_path/format/bit_depth/sample_rate recorded by an earlier write.
         with self._connect() as conn:
             conn.execute(
-                """UPDATE tracks SET download_status=?, file_path=?,
-                   format=?, bit_depth=?, sample_rate=?
+                """UPDATE tracks SET download_status=?,
+                   file_path=COALESCE(?, file_path),
+                   format=COALESCE(?, format),
+                   bit_depth=COALESCE(?, bit_depth),
+                   sample_rate=COALESCE(?, sample_rate)
                    WHERE id=?""",
                 (status, file_path, format, bit_depth, sample_rate, track_id),
             )
