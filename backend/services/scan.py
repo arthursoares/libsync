@@ -217,6 +217,20 @@ def _bit_depth_matches(local: int | None, library: int | None) -> bool:
     return local == library
 
 
+def _track_count_matches(local: int | None, library: int | None) -> bool:
+    """Unknown (None or 0) on either side is treated as 'compatible'.
+
+    A folder holding a different number of audio files than the library
+    album is usually an interrupted download. Auto-matching it would flip
+    the album to complete AND write every track ID into the dedup DB, so
+    the missing tracks could never be fetched again — those cases must go
+    to review instead.
+    """
+    if not local or not library:
+        return True
+    return local == library
+
+
 def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     norm_artist = normalize(meta.artist)
     norm_album = normalize(meta.album)
@@ -229,18 +243,20 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     if not candidates:
         return MatchResult(kind="unmatched")
 
-    # Partition candidates by bit-depth compatibility.
+    # Partition candidates by bit-depth AND track-count compatibility.
     compatible: list[dict] = []
     for album in candidates:
-        if _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
+        if _bit_depth_matches(
+            meta.bit_depth, album.get("bit_depth")
+        ) and _track_count_matches(meta.track_count, album.get("track_count")):
             compatible.append(album)
 
     # Auto-match only when we have exactly one candidate overall AND exactly
     # one compatible candidate AND the folder had a reliable artist (so
     # album-only fallback matches always need review). Requiring the original
     # pool to also be a singleton prevents silently auto-matching when the
-    # bit-depth filter happened to narrow multiple candidates (e.g. Qobuz +
-    # Tidal copies of the same album) down to one.
+    # compatibility filter happened to narrow multiple candidates (e.g. Qobuz
+    # + Tidal copies of the same album) down to one.
     if len(candidates) == 1 and len(compatible) == 1 and norm_artist:
         a = compatible[0]
         return MatchResult(
@@ -258,6 +274,11 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
         if not _bit_depth_matches(meta.bit_depth, album.get("bit_depth")):
             reasons.append(
                 f"bit_depth_mismatch: local={meta.bit_depth} library={album.get('bit_depth')}"
+            )
+        if not _track_count_matches(meta.track_count, album.get("track_count")):
+            reasons.append(
+                f"track_count_mismatch: local={meta.track_count} "
+                f"library={album.get('track_count')}"
             )
         if len(candidates) > 1 and not reasons:
             reasons.append("multiple_candidates")
@@ -292,11 +313,23 @@ def _dedup_db_path(source: str, dedup_db_dir: str) -> str:
     return os.path.join(dedup_db_dir, fname)
 
 
+def _connect_dedup(path: str) -> sqlite3.Connection:
+    """Open a dedup DB the same way AppDatabase._connect opens the app DB.
+
+    The download service writes these files concurrently with a scan, so a
+    busy timeout and WAL journalling are what keep both sides from hitting
+    "database is locked".
+    """
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def _populate_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
     """Insert track IDs into the per-source dedup DB. Idempotent."""
     path = _dedup_db_path(source, dedup_db_dir)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = _connect_dedup(path)
     try:
         conn.executescript(_DEDUP_SCHEMA)
         conn.executemany(
@@ -312,7 +345,7 @@ def _remove_from_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> 
     path = _dedup_db_path(source, dedup_db_dir)
     if not os.path.exists(path):
         return
-    conn = sqlite3.connect(path)
+    conn = _connect_dedup(path)
     try:
         conn.executemany(
             "DELETE FROM downloads WHERE id = ?",
@@ -457,6 +490,18 @@ def _find_album_folders(root: Path, max_depth: int = 3) -> tuple[list[Path], lis
     return sorted(results), skipped
 
 
+def _inspect_folder(folder: Path) -> tuple[bool, FolderMeta | None]:
+    """Sentinel probe + tag read, together, for one album folder.
+
+    Both are blocking file-system calls, so they share a single worker
+    thread hop. Returns (has_sentinel, meta); ``meta`` is None when the
+    folder is sentineled or holds no readable audio.
+    """
+    if (folder / ".streamrip.json").exists():
+        return True, None
+    return False, read_folder_metadata(folder)
+
+
 async def run_scan(
     db,
     *,
@@ -484,23 +529,25 @@ async def run_scan(
             "auto_matched": [],
             "review": [],
             "unmatched": [],
+            "failed": [],
         }
 
-    folders, skipped_dirs = _find_album_folders(root)
+    folders, skipped_dirs = await asyncio.to_thread(_find_album_folders, root)
     total = len(folders)
 
     auto_matched: list[dict] = []
     review: list[dict] = []
     unmatched: list[str] = []
+    failed: list[dict] = []
     sentinel_skipped = 0
 
     for i, folder in enumerate(folders, start=1):
-        if (folder / ".streamrip.json").exists():
+        has_sentinel, meta = await asyncio.to_thread(_inspect_folder, folder)
+        if has_sentinel:
             sentinel_skipped += 1
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue
 
-        meta = await asyncio.to_thread(read_folder_metadata, folder)
         if meta is None:
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue
@@ -508,21 +555,37 @@ async def run_scan(
         result = classify(meta, index)
 
         if result.kind == "auto_match":
-            await asyncio.to_thread(
-                mark_album_downloaded,
-                db,
-                result.album_id,
-                local_folder_path=str(folder),
-                dedup_db_dir=dedup_db_dir,
-                sentinel_write_enabled=sentinel_write_enabled,
-            )
-            auto_matched.append(
-                {
-                    "album_id": result.album_id,
-                    "folder": str(folder),
-                    "reason": result.reason,
-                }
-            )
+            # One unlucky folder (a locked dedup DB, an album deleted
+            # mid-scan) must not unwind the whole job and discard every
+            # album marked so far — record it and keep going.
+            try:
+                await asyncio.to_thread(
+                    mark_album_downloaded,
+                    db,
+                    result.album_id,
+                    local_folder_path=str(folder),
+                    dedup_db_dir=dedup_db_dir,
+                    sentinel_write_enabled=sentinel_write_enabled,
+                )
+            except Exception as e:
+                logger.exception(
+                    "scan: could not mark album %s for %s", result.album_id, folder
+                )
+                failed.append(
+                    {
+                        "folder": str(folder),
+                        "album_id": result.album_id,
+                        "error": str(e),
+                    }
+                )
+            else:
+                auto_matched.append(
+                    {
+                        "album_id": result.album_id,
+                        "folder": str(folder),
+                        "reason": result.reason,
+                    }
+                )
         elif result.kind == "review":
             review.append(
                 {
@@ -555,6 +618,7 @@ async def run_scan(
         "auto_matched": auto_matched,
         "review": review,
         "unmatched": unmatched,
+        "failed": failed,
     }
     await event_bus.publish("scan_complete", payload)
     return payload

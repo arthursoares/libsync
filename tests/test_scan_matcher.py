@@ -228,3 +228,64 @@ def test_multi_candidate_narrowed_by_bit_depth_still_review(tmp_path):
     assert result.kind == "review"
     # Both candidates should still appear in the review list.
     assert {c.album_id for c in result.candidates} == {10, 11}
+
+
+def _beatles_meta(tmp_path, track_count: int | None) -> FolderMeta:
+    return FolderMeta(
+        folder=_folder(tmp_path),
+        artist="The Beatles",
+        album="Abbey Road",
+        bit_depth=24,
+        sample_rate=96.0,
+        track_count=track_count,
+        source="tags",
+    )
+
+
+def _beatles_library(track_count: int | None) -> LibraryIndex:
+    return _library(
+        [
+            {
+                "id": 1,
+                "source": "qobuz",
+                "artist": "The Beatles",
+                "title": "Abbey Road",
+                "bit_depth": 24,
+                "sample_rate": 96.0,
+                "track_count": track_count,
+            },
+        ]
+    )
+
+
+def test_equal_track_count_auto_matches(tmp_path):
+    result = classify(_beatles_meta(tmp_path, 17), _beatles_library(17))
+    assert result.kind == "auto_match"
+    assert result.album_id == 1
+
+
+def test_fewer_local_tracks_goes_to_review(tmp_path):
+    """An interrupted download (3 of 17 files) must never auto-match — it
+    would mark the album complete and poison the dedup DB."""
+    result = classify(_beatles_meta(tmp_path, 3), _beatles_library(17))
+    assert result.kind == "review"
+    assert result.candidates[0].album_id == 1
+    assert "track_count_mismatch: local=3 library=17" in result.candidates[0].reason
+
+
+def test_more_local_tracks_goes_to_review(tmp_path):
+    result = classify(_beatles_meta(tmp_path, 20), _beatles_library(17))
+    assert result.kind == "review"
+    assert "track_count_mismatch: local=20 library=17" in result.candidates[0].reason
+
+
+def test_unknown_local_track_count_allows_auto_match(tmp_path):
+    assert classify(_beatles_meta(tmp_path, None), _beatles_library(17)).kind == (
+        "auto_match"
+    )
+
+
+def test_unknown_library_track_count_allows_auto_match(tmp_path):
+    assert classify(_beatles_meta(tmp_path, 3), _beatles_library(None)).kind == (
+        "auto_match"
+    )
