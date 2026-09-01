@@ -24,6 +24,38 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in ("true", "1", "yes")
 
 
+def _album_folder_from_result(result) -> str | None:
+    """Derive the album folder the SDK downloaded into, or None.
+
+    The two SDKs name the per-track file differently — Qobuz's
+    ``TrackResult`` carries ``path``, Tidal's carries ``file_path`` — so
+    probe both defensively. Multi-disc downloads put discs after the first
+    in a ``Disc N/`` subfolder while the sentinel lives in the album folder
+    itself, so take the common parent of every successful track rather than
+    one arbitrary dirname.
+    """
+    folders: list[str] = []
+    for track in getattr(result, "tracks", None) or []:
+        if not getattr(track, "success", False):
+            continue
+        path = getattr(track, "path", None) or getattr(track, "file_path", None)
+        if not path:
+            continue
+        folder = os.path.dirname(path)
+        if folder:
+            folders.append(folder)
+
+    if not folders:
+        return None
+    if len(folders) == 1:
+        return folders[0]
+    try:
+        return os.path.commonpath(folders)
+    except ValueError:
+        # Mixed absolute/relative paths — fall back to the shallowest.
+        return min(folders, key=len)
+
+
 class DownloadService:
     def __init__(
         self,
@@ -262,10 +294,16 @@ class DownloadService:
                     )
                 else:
                     item["status"] = "complete"
-                    self.db.update_album_status(
+                    # Record the folder the SDK wrote to alongside the status:
+                    # without it ``unmark_album_downloaded`` has no path and
+                    # leaves the SDK's .streamrip.json sentinel behind, which
+                    # hides the folder from every later scan.
+                    # ``set_album_download_state`` COALESCEs the path, so a
+                    # None keeps whatever a previous scan recorded.
+                    self.db.set_album_download_state(
                         item["album_db_id"],
-                        "complete",
                         downloaded_at=datetime.now().isoformat(),
+                        local_folder_path=item.get("local_folder_path"),
                     )
                     await self.event_bus.publish(
                         "download_complete",
@@ -491,6 +529,7 @@ class DownloadService:
 
         item["track_count"] = result.total
         item["tracks_done"] = result.successful
+        item["local_folder_path"] = _album_folder_from_result(result)
 
         # Update album metadata in DB with resolved data from download.
         # This is a narrow UPDATE, not an upsert: upsert_album overwrites
