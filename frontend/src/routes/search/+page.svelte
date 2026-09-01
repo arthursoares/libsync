@@ -5,6 +5,7 @@
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
   import { currentSource, selectedAlbum, loadAlbumDetail } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
 
   let source = $derived($currentSource);
   let detail = $derived($selectedAlbum);
@@ -64,7 +65,7 @@
           track_count: r.track_count ?? null,
           release_date: r.release_date ?? null,
         }));
-      await api.downloads.enqueue(source, [...selectedAlbums], { albums });
+      await enqueueDownloads(source, [...selectedAlbums], { albums });
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
