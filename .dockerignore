@@ -1,0 +1,16 @@
+# Never send credential-bearing state or VCS/CI metadata into the build
+# context (Docker consults only .dockerignore, never .gitignore).
+data/
+.git/
+.github/
+.claude/
+**/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+backend/static/
+*.db
+.venv/
+**/__pycache__/
+*.pyc
+.DS_Store
+docs/
