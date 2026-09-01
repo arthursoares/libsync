@@ -19,6 +19,28 @@ logger = logging.getLogger("streamrip")
 router = APIRouter(prefix="/api/library", tags=["library"])
 
 
+# How many finished scan jobs stay in the in-memory registry. The polling
+# endpoint reads it, so a small rolling window is enough — without a cap it
+# grows for the life of the process.
+MAX_FINISHED_SCAN_JOBS = 20
+
+
+def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
+    """Drop all but the most recently started finished scan jobs.
+
+    Never evicts the active job, nor any job still reporting "running".
+    ``dict`` preserves insertion order, so the oldest keys come first.
+    """
+    finished = [
+        job_id
+        for job_id, job in jobs.items()
+        if job_id != active_job_id and job.get("status") != "running"
+    ]
+    excess = len(finished) - MAX_FINISHED_SCAN_JOBS
+    for job_id in finished[:excess] if excess > 0 else []:
+        jobs.pop(job_id, None)
+
+
 def _dedup_db_dir() -> str:
     db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
     return os.path.dirname(db_path) or "data"
@@ -163,6 +185,8 @@ async def start_scan(request: Request):
     sentinel_enabled = _parse_bool(
         db.get_config("scan_sentinel_write_enabled"), default=True
     )
+
+    _prune_scan_jobs(app.state.scan_jobs, active_job_id=app.state.active_scan_job)
 
     job_id = uuid.uuid4().hex
     app.state.scan_jobs[job_id] = {

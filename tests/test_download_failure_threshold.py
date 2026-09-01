@@ -487,3 +487,180 @@ class TestFailedDownloadHistory:
         assert len(items) == 1
         assert items[0]["album_db_id"] == db_id
         assert db.get_album(db_id)["download_status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# A sub-threshold download must not leave "complete" track rows behind, and
+# must take the SDK's sentinel back off disk so the folder stays scannable
+# ---------------------------------------------------------------------------
+
+
+def _seed_album_with_tracks(db, source: str, source_album_id: str, count: int) -> int:
+    album_id = db.upsert_album(
+        source=source,
+        source_album_id=source_album_id,
+        title="Test Album",
+        artist="Test Artist",
+        track_count=count,
+    )
+    for i in range(count):
+        db.upsert_track(
+            album_id=album_id,
+            source_track_id=str(i),
+            title=f"T{i}",
+            artist="Test Artist",
+            track_number=i + 1,
+        )
+    return album_id
+
+
+class TestPartialDownloadCleansUp:
+    async def test_seven_of_twelve_leaves_no_track_complete_and_no_sentinel(
+        self, db, event_bus, tmp_path
+    ):
+        """7/12 = 58% is below threshold.
+
+        The successful tracks must not be recorded as complete, and the
+        ``.streamrip.json`` the SDK wrote for them has to go — ``run_scan``
+        skips any folder holding one, so leaving it hides a half-downloaded
+        album from reconciliation forever.
+        """
+        folder = tmp_path / "Test Artist - Test Album"
+        folder.mkdir()
+        sentinel = folder / ".streamrip.json"
+        sentinel.write_text('{"source": "qobuz"}')
+
+        album_db_id = _seed_album_with_tracks(db, "qobuz", "partial-album", 12)
+        result = FakeAlbumResult(
+            total=12,
+            successful=7,
+            tracks=[
+                FakeTrackResult(
+                    track_id=i,
+                    title=f"T{i}",
+                    success=(i < 7),
+                    path=str(folder / f"{i}.flac") if i < 7 else None,
+                )
+                for i in range(12)
+            ],
+        )
+
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path=str(tmp_path)
+        )
+        item = {
+            "id": "queue-partial",
+            "album_db_id": album_db_id,
+            "source": "qobuz",
+            "source_album_id": "partial-album",
+            "title": "Test Album",
+            "artist": "Test Artist",
+            "cover_url": None,
+            "track_count": 12,
+            "tracks_done": 0,
+            "bytes_done": 0,
+            "bytes_total": 0,
+            "speed": 0.0,
+            "status": "pending",
+            "force": False,
+        }
+        service._queue.append(item)
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            await service._process_queue()
+
+        assert item["status"] == "failed"
+        assert db.get_album(album_db_id)["download_status"] == "failed"
+
+        statuses = {t["download_status"] for t in db.get_tracks(album_db_id)}
+        assert "complete" not in statuses
+
+        assert not sentinel.exists()
+        assert folder.exists()
+
+    async def test_above_threshold_keeps_the_sentinel_and_marks_tracks(
+        self, db, event_bus, tmp_path
+    ):
+        """The happy path must be untouched by the reordering."""
+        folder = tmp_path / "Test Artist - Good Album"
+        folder.mkdir()
+        sentinel = folder / ".streamrip.json"
+        sentinel.write_text('{"source": "qobuz"}')
+
+        album_db_id = _seed_album_with_tracks(db, "qobuz", "good-album", 10)
+        result = FakeAlbumResult(
+            total=10,
+            successful=10,
+            tracks=[
+                FakeTrackResult(
+                    track_id=i,
+                    title=f"T{i}",
+                    success=True,
+                    path=str(folder / f"{i}.flac"),
+                )
+                for i in range(10)
+            ],
+        )
+
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path=str(tmp_path)
+        )
+        item = {
+            "id": "queue-good",
+            "album_db_id": album_db_id,
+            "source": "qobuz",
+            "source_album_id": "good-album",
+            "title": "Test Album",
+            "artist": "Test Artist",
+            "cover_url": None,
+            "track_count": 10,
+            "tracks_done": 0,
+            "bytes_done": 0,
+            "bytes_total": 0,
+            "speed": 0.0,
+            "status": "pending",
+            "force": False,
+        }
+        service._queue.append(item)
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            await service._process_queue()
+
+        assert item["status"] == "complete"
+        assert sentinel.exists()
+        statuses = {t["download_status"] for t in db.get_tracks(album_db_id)}
+        assert statuses == {"complete"}
+
+    async def test_missing_sentinel_is_not_an_error(self, db, event_bus, tmp_path):
+        """The SDK writes no sentinel when nothing succeeded — removal is
+        best-effort and must not mask the threshold RuntimeError."""
+        folder = tmp_path / "Test Artist - Nothing"
+        folder.mkdir()
+
+        result = FakeAlbumResult(
+            total=10,
+            successful=1,
+            tracks=[
+                FakeTrackResult(
+                    track_id=i,
+                    title=f"T{i}",
+                    success=(i == 0),
+                    path=str(folder / "0.flac") if i == 0 else None,
+                )
+                for i in range(10)
+            ],
+        )
+        client = _make_qobuz_client()
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path=str(tmp_path)
+        )
+        item = _make_queue_item(db, "qobuz", "no-sentinel")
+
+        fake_downloader = _make_fake_downloader_returning(result)
+        with patch("qobuz.AlbumDownloader", new=fake_downloader):
+            with pytest.raises(RuntimeError, match="below 80%"):
+                await service._download_album(item)

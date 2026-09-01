@@ -24,6 +24,68 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in ("true", "1", "yes")
 
 
+SENTINEL_FILENAME = ".streamrip.json"
+
+# Queue item states that will never change again.
+TERMINAL_STATUSES = ("complete", "failed", "cancelled")
+
+# How many finished items the in-memory queue keeps.  The queue doubles as
+# the UI's live history, but the durable history comes from the DB, so a
+# small rolling window is enough.
+MAX_TERMINAL_QUEUE_ITEMS = 100
+
+
+def _remove_album_sentinel(folder: str | None) -> None:
+    """Best-effort delete of the SDK-written sentinel in ``folder``.
+
+    Both SDK downloaders drop a ``.streamrip.json`` as soon as one track
+    succeeds, and ``run_scan`` skips any folder that has one. A download
+    that fails the success threshold must therefore take the sentinel back
+    off disk, or the half-downloaded folder is invisible to reconciliation
+    forever.
+    """
+    if not folder:
+        return
+    try:
+        os.remove(os.path.join(folder, SENTINEL_FILENAME))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("download: could not remove sentinel in %s: %s", folder, exc)
+
+
+def _album_folder_from_result(result) -> str | None:
+    """Derive the album folder the SDK downloaded into, or None.
+
+    The two SDKs name the per-track file differently — Qobuz's
+    ``TrackResult`` carries ``path``, Tidal's carries ``file_path`` — so
+    probe both defensively. Multi-disc downloads put discs after the first
+    in a ``Disc N/`` subfolder while the sentinel lives in the album folder
+    itself, so take the common parent of every successful track rather than
+    one arbitrary dirname.
+    """
+    folders: list[str] = []
+    for track in getattr(result, "tracks", None) or []:
+        if not getattr(track, "success", False):
+            continue
+        path = getattr(track, "path", None) or getattr(track, "file_path", None)
+        if not path:
+            continue
+        folder = os.path.dirname(path)
+        if folder:
+            folders.append(folder)
+
+    if not folders:
+        return None
+    if len(folders) == 1:
+        return folders[0]
+    try:
+        return os.path.commonpath(folders)
+    except ValueError:
+        # Mixed absolute/relative paths — fall back to the shallowest.
+        return min(folders, key=len)
+
+
 class DownloadService:
     def __init__(
         self,
@@ -203,16 +265,41 @@ class DownloadService:
     def get_queue(self) -> list[dict]:
         return list(self._queue)
 
+    def _prune_queue(self) -> None:
+        """Bound the in-memory queue after an item reaches a terminal state.
+
+        Finished items used to stay in ``_queue`` for the life of the
+        process: ``GET /api/downloads/queue`` re-serialised every one of
+        them on each poll and ``_process_queue`` rescanned the whole list
+        each iteration.  Keep every live item and only the most recent
+        finished ones — the route merges durable history from the DB.
+        """
+        terminal = [i for i in self._queue if i["status"] in TERMINAL_STATUSES]
+        excess = len(terminal) - MAX_TERMINAL_QUEUE_ITEMS
+        if excess <= 0:
+            return
+        # Oldest first: the queue preserves enqueue order.
+        dropped = {i["id"] for i in terminal[:excess]}
+        self._queue = [i for i in self._queue if i["id"] not in dropped]
+
     async def cancel(self, item_ids: list[str]):
         for item_id in item_ids:
-            self._cancel_requested.add(item_id)
             for item in self._queue:
-                if item["id"] == item_id and item["status"] in (
+                if item["id"] != item_id or item["status"] not in (
                     "pending",
                     "downloading",
                 ):
-                    item["status"] = "cancelled"
-                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                    continue
+                if item["status"] == "downloading":
+                    # The SDK can't be interrupted mid-album, so record the
+                    # request and let the worker re-check it once the download
+                    # returns. Only in-flight items need this: a pending item
+                    # is skipped on status alone, and recording its ID would
+                    # leak it for the life of the process, since the worker
+                    # never visits that item again.
+                    self._cancel_requested.add(item_id)
+                item["status"] = "cancelled"
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
 
     async def cancel_all(self):
         ids = [
@@ -231,6 +318,7 @@ class DownloadService:
             if item["id"] in self._cancel_requested:
                 item["status"] = "cancelled"
                 self._cancel_requested.discard(item["id"])
+                self._prune_queue()
                 continue
 
             item["status"] = "downloading"
@@ -262,10 +350,16 @@ class DownloadService:
                     )
                 else:
                     item["status"] = "complete"
-                    self.db.update_album_status(
+                    # Record the folder the SDK wrote to alongside the status:
+                    # without it ``unmark_album_downloaded`` has no path and
+                    # leaves the SDK's .streamrip.json sentinel behind, which
+                    # hides the folder from every later scan.
+                    # ``set_album_download_state`` COALESCEs the path, so a
+                    # None keeps whatever a previous scan recorded.
+                    self.db.set_album_download_state(
                         item["album_db_id"],
-                        "complete",
                         downloaded_at=datetime.now().isoformat(),
+                        local_folder_path=item.get("local_folder_path"),
                     )
                     await self.event_bus.publish(
                         "download_complete",
@@ -291,6 +385,13 @@ class DownloadService:
                 await self.event_bus.publish(
                     "download_failed", {"item_id": item["id"], "error": str(e)}
                 )
+            finally:
+                # The item is terminal either way: drop any cancel request
+                # still pending against it (nothing else ever removes IDs for
+                # items that finished before the request landed) and keep the
+                # queue bounded.
+                self._cancel_requested.discard(item["id"])
+                self._prune_queue()
 
     def _build_dl_config_kwargs(
         self,
@@ -397,8 +498,15 @@ class DownloadService:
         # list at emit time.
         track_statuses_by_num: dict[int, dict] = {}
         last_emit = [0.0]
-        # Per-track download start time, for per-track speed calculations
-        track_start_times: dict[int, float] = {}
+        # Per-track byte counters keyed by track number.  Each callback
+        # carries *that* track's absolute counters, so writing them straight
+        # onto the shared item made the album totals jump between whichever
+        # of the concurrently downloading tracks reported last.  Keep them
+        # apart and publish the sums.
+        track_bytes: dict[int, tuple[int, int]] = {}
+        # When the album's first track started — the album-wide rate is
+        # measured from there, not per track.
+        album_start_time: list[float | None] = [None]
 
         def _render_statuses() -> list[dict]:
             return [
@@ -438,21 +546,27 @@ class DownloadService:
                 "status": "downloading",
                 "progress": 0,
             }
-            track_start_times[num] = _time.monotonic()
+            if album_start_time[0] is None:
+                album_start_time[0] = _time.monotonic()
             _emit_progress()
 
         def on_track_progress(num: int, bytes_done: int, bytes_total: int):
-            queue_item["bytes_done"] = bytes_done
-            queue_item["bytes_total"] = bytes_total
+            track_bytes[num] = (bytes_done, bytes_total)
+            album_done = sum(done for done, _ in track_bytes.values())
+            queue_item["bytes_done"] = album_done
+            queue_item["bytes_total"] = sum(total for _, total in track_bytes.values())
 
             status = track_statuses_by_num.get(num)
             if status is not None and bytes_total > 0:
                 status["progress"] = min(100, round(bytes_done / bytes_total * 100))
 
-            # Speed for *this* track (per-track, not the album-wide last call)
-            start = track_start_times.get(num, _time.monotonic())
+            # One album-wide rate: everything downloaded so far over the time
+            # since the album's first track started.
+            start = album_start_time[0]
+            if start is None:
+                start = album_start_time[0] = _time.monotonic()
             elapsed = _time.monotonic() - start
-            speed = (bytes_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+            speed = (album_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
             queue_item["speed"] = round(speed, 2)
 
             # Throttle WebSocket events to every 0.5s
@@ -491,6 +605,7 @@ class DownloadService:
 
         item["track_count"] = result.total
         item["tracks_done"] = result.successful
+        item["local_folder_path"] = _album_folder_from_result(result)
 
         # Update album metadata in DB with resolved data from download.
         # This is a narrow UPDATE, not an upsert: upsert_album overwrites
@@ -507,15 +622,22 @@ class DownloadService:
             item["title"] = result.title
             item["artist"] = result.artist
 
-        # Update track statuses in web DB
-        self._update_track_statuses_from_result(item, result)
-
-        # Check 80% success threshold
+        # Check the 80% success threshold BEFORE writing track statuses back:
+        # a sub-threshold album is treated as failed, so its track rows must
+        # not be left claiming "complete".
         if result.total > 0 and result.success_rate < 0.8:
+            # The SDK already wrote its sentinel for the tracks that did
+            # succeed. Remove it so the fuzzy scan can still classify this
+            # folder later. Dedup rows are deliberately left in place: they
+            # are accurate for those tracks and let a retry skip them.
+            _remove_album_sentinel(item.get("local_folder_path"))
             raise RuntimeError(
                 f"Only {result.successful}/{result.total} tracks downloaded "
                 f"({result.success_rate:.0%}), below 80% threshold"
             )
+
+        # Update track statuses in web DB
+        self._update_track_statuses_from_result(item, result)
 
         logger.info(
             "Download complete: %s - %s (%d/%d tracks)",
