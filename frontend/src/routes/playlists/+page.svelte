@@ -297,7 +297,7 @@
     border-bottom: 2px solid var(--border);
   }
   .playlist-row:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .playlist-name {
@@ -400,7 +400,7 @@
     cursor: pointer;
   }
   .close-btn:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .detail-actions {
@@ -429,7 +429,7 @@
     border-bottom: 1px solid var(--border-subtle);
   }
   .track-row:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .track-num {
