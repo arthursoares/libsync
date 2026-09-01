@@ -26,6 +26,14 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
 
 SENTINEL_FILENAME = ".streamrip.json"
 
+# Queue item states that will never change again.
+TERMINAL_STATUSES = ("complete", "failed", "cancelled")
+
+# How many finished items the in-memory queue keeps.  The queue doubles as
+# the UI's live history, but the durable history comes from the DB, so a
+# small rolling window is enough.
+MAX_TERMINAL_QUEUE_ITEMS = 100
+
 
 def _remove_album_sentinel(folder: str | None) -> None:
     """Best-effort delete of the SDK-written sentinel in ``folder``.
@@ -257,16 +265,41 @@ class DownloadService:
     def get_queue(self) -> list[dict]:
         return list(self._queue)
 
+    def _prune_queue(self) -> None:
+        """Bound the in-memory queue after an item reaches a terminal state.
+
+        Finished items used to stay in ``_queue`` for the life of the
+        process: ``GET /api/downloads/queue`` re-serialised every one of
+        them on each poll and ``_process_queue`` rescanned the whole list
+        each iteration.  Keep every live item and only the most recent
+        finished ones — the route merges durable history from the DB.
+        """
+        terminal = [i for i in self._queue if i["status"] in TERMINAL_STATUSES]
+        excess = len(terminal) - MAX_TERMINAL_QUEUE_ITEMS
+        if excess <= 0:
+            return
+        # Oldest first: the queue preserves enqueue order.
+        dropped = {i["id"] for i in terminal[:excess]}
+        self._queue = [i for i in self._queue if i["id"] not in dropped]
+
     async def cancel(self, item_ids: list[str]):
         for item_id in item_ids:
-            self._cancel_requested.add(item_id)
             for item in self._queue:
-                if item["id"] == item_id and item["status"] in (
+                if item["id"] != item_id or item["status"] not in (
                     "pending",
                     "downloading",
                 ):
-                    item["status"] = "cancelled"
-                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                    continue
+                if item["status"] == "downloading":
+                    # The SDK can't be interrupted mid-album, so record the
+                    # request and let the worker re-check it once the download
+                    # returns. Only in-flight items need this: a pending item
+                    # is skipped on status alone, and recording its ID would
+                    # leak it for the life of the process, since the worker
+                    # never visits that item again.
+                    self._cancel_requested.add(item_id)
+                item["status"] = "cancelled"
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
 
     async def cancel_all(self):
         ids = [
@@ -285,6 +318,7 @@ class DownloadService:
             if item["id"] in self._cancel_requested:
                 item["status"] = "cancelled"
                 self._cancel_requested.discard(item["id"])
+                self._prune_queue()
                 continue
 
             item["status"] = "downloading"
@@ -351,6 +385,13 @@ class DownloadService:
                 await self.event_bus.publish(
                     "download_failed", {"item_id": item["id"], "error": str(e)}
                 )
+            finally:
+                # The item is terminal either way: drop any cancel request
+                # still pending against it (nothing else ever removes IDs for
+                # items that finished before the request landed) and keep the
+                # queue bounded.
+                self._cancel_requested.discard(item["id"])
+                self._prune_queue()
 
     def _build_dl_config_kwargs(
         self,

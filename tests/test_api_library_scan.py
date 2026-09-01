@@ -242,3 +242,74 @@ class TestScanFuzzy:
             if resp.json()["status"] == "complete":
                 break
             await asyncio.sleep(0.05)
+
+
+class TestScanJobRegistryIsBounded:
+    """`app.state.scan_jobs` used to grow for the life of the process."""
+
+    def test_prune_keeps_only_the_newest_finished_jobs(self):
+        from backend.api.library import MAX_FINISHED_SCAN_JOBS, _prune_scan_jobs
+
+        jobs = {
+            f"job-{i:03d}": {"status": "complete", "result": {}}
+            for i in range(MAX_FINISHED_SCAN_JOBS + 15)
+        }
+        _prune_scan_jobs(jobs, active_job_id=None)
+
+        assert len(jobs) == MAX_FINISHED_SCAN_JOBS
+        # Insertion order is age order, so the survivors are the newest.
+        assert list(jobs) == [
+            f"job-{i:03d}" for i in range(15, MAX_FINISHED_SCAN_JOBS + 15)
+        ]
+
+    def test_prune_never_evicts_the_active_or_a_running_job(self):
+        from backend.api.library import MAX_FINISHED_SCAN_JOBS, _prune_scan_jobs
+
+        jobs = {"job-active": {"status": "running", "progress": {}}}
+        jobs["job-other-running"] = {"status": "running", "progress": {}}
+        jobs.update(
+            {
+                f"job-{i:03d}": {"status": "complete", "result": {}}
+                for i in range(MAX_FINISHED_SCAN_JOBS + 15)
+            }
+        )
+        _prune_scan_jobs(jobs, active_job_id="job-active")
+
+        assert "job-active" in jobs
+        assert "job-other-running" in jobs
+        finished = [k for k, v in jobs.items() if v["status"] == "complete"]
+        assert len(finished) == MAX_FINISHED_SCAN_JOBS
+
+    def test_prune_leaves_a_short_registry_alone(self):
+        from backend.api.library import _prune_scan_jobs
+
+        jobs = {f"job-{i}": {"status": "complete", "result": {}} for i in range(3)}
+        _prune_scan_jobs(jobs, active_job_id=None)
+        assert len(jobs) == 3
+
+    async def test_starting_a_scan_trims_the_registry(
+        self, client, app, album_id, tmp_path
+    ):
+        from backend.api.library import MAX_FINISHED_SCAN_JOBS
+
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        (tmp_path / "music").mkdir()
+
+        for i in range(MAX_FINISHED_SCAN_JOBS + 25):
+            app.state.scan_jobs[f"old-{i:03d}"] = {"status": "complete", "result": {}}
+
+        resp = await client.post("/api/library/scan-fuzzy")
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+
+        # 20 retained old jobs plus the one just started.
+        assert len(app.state.scan_jobs) == MAX_FINISHED_SCAN_JOBS + 1
+        assert job_id in app.state.scan_jobs
+        assert "old-000" not in app.state.scan_jobs
+        assert f"old-{MAX_FINISHED_SCAN_JOBS + 24:03d}" in app.state.scan_jobs
+
+        for _ in range(20):
+            st = (await client.get(f"/api/library/scan-fuzzy/{job_id}")).json()
+            if st["status"] == "complete":
+                break
+            await asyncio.sleep(0.05)
