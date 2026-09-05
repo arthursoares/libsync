@@ -9,6 +9,7 @@ each poll and ``_process_queue`` rescans the list each iteration — while
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,6 +67,23 @@ def _instant_downloader():
 def _service(db, event_bus):
     client = MagicMock()
     client.catalog = MagicMock()
+    client.catalog.get_album_with_tracks = AsyncMock(
+        return_value=(
+            SimpleNamespace(tracks_count=1),
+            [
+                SimpleNamespace(
+                    id="track-1",
+                    title="Track 1",
+                    performer=SimpleNamespace(name="Test Artist"),
+                    track_number=1,
+                    disc_number=1,
+                    duration=180,
+                    explicit=False,
+                    isrc=None,
+                )
+            ],
+        )
+    )
     return DownloadService(
         db, event_bus, clients={"qobuz": client}, download_path="/tmp"
     )

@@ -12,6 +12,8 @@ from backend.services.scan import (
     unmark_album_downloaded,
 )
 
+TRACK_IDS = ("t1", "t2")
+
 
 @pytest.fixture
 def db(tmp_path):
@@ -21,7 +23,7 @@ def db(tmp_path):
         source_album_id="42",
         title="Abbey Road",
         artist="The Beatles",
-        track_count=17,
+        track_count=2,
         bit_depth=24,
         sample_rate=96.0,
     )
@@ -68,6 +70,7 @@ def test_mark_updates_db_and_writes_sentinel(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=True,
     )
 
@@ -82,7 +85,7 @@ def test_mark_updates_db_and_writes_sentinel(tmp_path, db):
     assert payload["source"] == "qobuz"
     assert payload["album_id"] == "42"
     assert payload["title"] == "Abbey Road"
-    assert payload["tracks_count"] == 17
+    assert payload["tracks_count"] == 2
 
 
 def test_mark_populates_dedup_db(tmp_path, db):
@@ -95,6 +98,7 @@ def test_mark_populates_dedup_db(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=False,
     )
 
@@ -110,6 +114,7 @@ def test_mark_without_folder_is_db_only(tmp_path, db):
         album_id,
         local_folder_path=None,
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=True,
     )
     row = d.get_album(album_id)
@@ -127,6 +132,7 @@ def test_mark_idempotent(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=True,
     )
     mark_album_downloaded(
@@ -134,6 +140,7 @@ def test_mark_idempotent(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=True,
     )
 
@@ -154,6 +161,7 @@ def test_mark_graceful_on_readonly_folder(tmp_path, db, caplog):
             album_id,
             local_folder_path=str(folder),
             dedup_db_dir=str(tmp_path),
+            track_ids=TRACK_IDS,
             sentinel_write_enabled=True,
         )
     finally:
@@ -175,6 +183,7 @@ def test_mark_skips_sentinel_when_disabled(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=False,
     )
     assert not (folder / ".streamrip.json").exists()
@@ -191,9 +200,12 @@ def test_unmark_reverses_everything(tmp_path, db):
         album_id,
         local_folder_path=str(folder),
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=True,
     )
-    unmark_album_downloaded(d, album_id, dedup_db_dir=str(tmp_path))
+    unmark_album_downloaded(
+        d, album_id, dedup_db_dir=str(tmp_path), track_ids=TRACK_IDS
+    )
 
     row = d.get_album(album_id)
     assert row["download_status"] == "not_downloaded"
@@ -212,6 +224,7 @@ def test_dedup_db_opened_in_wal_mode(tmp_path, db):
         album_id,
         local_folder_path=None,
         dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
         sentinel_write_enabled=False,
     )
 
@@ -221,3 +234,49 @@ def test_dedup_db_opened_in_wal_mode(tmp_path, db):
     finally:
         conn.close()
     assert mode.lower() == "wal"
+
+
+def test_mark_rejects_empty_track_ids_before_any_mutation(tmp_path, db):
+    d, album_id = db
+    folder = tmp_path / "music" / "X"
+    folder.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="non-empty track identity"):
+        mark_album_downloaded(
+            d,
+            album_id,
+            local_folder_path=str(folder),
+            dedup_db_dir=str(tmp_path),
+            track_ids=(),
+        )
+
+    assert d.get_album(album_id)["download_status"] == "not_downloaded"
+    assert not (folder / ".streamrip.json").exists()
+    assert not os.path.exists(_dedup_path(tmp_path, "qobuz"))
+
+
+def test_unmark_removes_current_and_historical_cached_ids(tmp_path, db):
+    d, album_id = db
+    d.upsert_track(album_id, "historical", "Old Track", "The Beatles")
+    dedup_path = _dedup_path(tmp_path, "qobuz")
+    conn = sqlite3.connect(dedup_path)
+    try:
+        conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+        conn.executemany(
+            "INSERT INTO downloads (id) VALUES (?)",
+            [("t1",), ("t2",), ("historical",)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    d.set_album_download_state(album_id, downloaded_at="2026-09-05T00:00:00")
+
+    unmark_album_downloaded(
+        d,
+        album_id,
+        dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
+    )
+
+    assert _dedup_rows(dedup_path) == []
+    assert d.get_album(album_id)["download_status"] == "not_downloaded"

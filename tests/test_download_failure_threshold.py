@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -99,11 +100,25 @@ def _make_fake_downloader_returning(result: FakeAlbumResult):
     return _fake_class
 
 
-def _make_qobuz_client():
-    """Bare client mock — _download_album never calls anything on it
-    directly, the (mocked) AlbumDownloader does."""
+def _make_qobuz_client(track_count: int = 10):
     client = MagicMock()
     client.catalog = MagicMock()
+    tracks = [
+        SimpleNamespace(
+            id=i,
+            title=f"T{i}",
+            performer=SimpleNamespace(name="Test Artist"),
+            track_number=i + 1,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        for i in range(track_count)
+    ]
+    client.catalog.get_album_with_tracks = AsyncMock(
+        return_value=(SimpleNamespace(tracks_count=track_count), tracks)
+    )
     return client
 
 
@@ -230,6 +245,14 @@ class TestSuccessThreshold:
             # Must NOT raise
             await service._download_album(item)
 
+        cached = {
+            track["source_track_id"]: track
+            for track in db.get_tracks(item["album_db_id"])
+        }
+        assert len(cached) == 10
+        assert cached["5"]["download_status"] == "not_downloaded"
+        assert sum(t["download_status"] == "complete" for t in cached.values()) == 9
+
     async def test_zero_total_does_not_raise(self, db, event_bus):
         """An empty album (total=0) should not crash on the threshold check."""
         result = FakeAlbumResult(total=0, successful=0, tracks=[])
@@ -280,6 +303,35 @@ def _build_queue_item_in_place(service, db, source: str, source_album_id: str):
 
 
 class TestProcessQueueHandlesFailure:
+    async def test_catalog_preflight_failure_uses_worker_failure_path(
+        self, db, event_bus
+    ):
+        client = _make_qobuz_client()
+        client.catalog.get_album_with_tracks = AsyncMock(
+            side_effect=OSError("catalog offline")
+        )
+        service = DownloadService(
+            db, event_bus, clients={"qobuz": client}, download_path="/tmp"
+        )
+        item, db_id = _build_queue_item_in_place(
+            service, db, "qobuz", "catalog-failure"
+        )
+        failures = []
+
+        async def record_failure(data):
+            failures.append(data)
+
+        event_bus.subscribe("download_failed", record_failure)
+
+        with patch("qobuz.AlbumDownloader") as downloader:
+            await service._process_queue()
+
+        assert item["status"] == "failed"
+        assert "catalog offline" in failures[0]["error"]
+        assert db.get_album(db_id)["download_status"] == "failed"
+        assert db.get_tracks(db_id) == []
+        downloader.assert_not_called()
+
     async def test_failed_download_marks_queue_item_failed(self, db, event_bus):
         """When _download_album raises, _process_queue must mark the item
         as failed and persist 'failed' on the album DB row."""
@@ -327,7 +379,7 @@ class TestProcessQueueHandlesFailure:
                 for i in range(4)
             ],
         )
-        client = _make_qobuz_client()
+        client = _make_qobuz_client(4)
         service = DownloadService(
             db, event_bus, clients={"qobuz": client}, download_path="/tmp"
         )
@@ -417,7 +469,7 @@ class TestCompletedDownloadPreservesMetadata:
         # The three fields the download actually resolved:
         assert album["title"] == "In Rainbows"
         assert album["artist"] == "Radiohead"
-        assert album["track_count"] == 4
+        assert album["track_count"] == 10
         # Everything else must survive untouched:
         assert album["cover_url"] == "https://example/cover.jpg"
         assert album["release_date"] == "2007-10-10"
@@ -545,7 +597,7 @@ class TestPartialDownloadCleansUp:
             ],
         )
 
-        client = _make_qobuz_client()
+        client = _make_qobuz_client(12)
         service = DownloadService(
             db, event_bus, clients={"qobuz": client}, download_path=str(tmp_path)
         )

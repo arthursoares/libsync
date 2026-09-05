@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -121,6 +122,22 @@ def _queue_item_in_place(service, db, source: str, source_album_id: str):
 def _service(db, event_bus):
     client = MagicMock()
     client.catalog = MagicMock()
+    tracks = [
+        SimpleNamespace(
+            id=i,
+            title=f"T{i}",
+            performer=SimpleNamespace(name="Test Artist"),
+            track_number=i + 1,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        for i in range(4)
+    ]
+    client.catalog.get_album_with_tracks = AsyncMock(
+        return_value=(SimpleNamespace(tracks_count=4), tracks)
+    )
     return DownloadService(
         db, event_bus, clients={"qobuz": client, "tidal": client}, download_path="/tmp"
     )
@@ -271,7 +288,12 @@ class TestCompletedDownloadRecordsFolder:
         assert db.get_album(db_id)["local_folder_path"] == str(folder)
         assert sentinel.exists()
 
-        unmark_album_downloaded(db, db_id, dedup_db_dir=str(tmp_path))
+        unmark_album_downloaded(
+            db,
+            db_id,
+            dedup_db_dir=str(tmp_path),
+            track_ids=tuple(track["source_track_id"] for track in db.get_tracks(db_id)),
+        )
 
         assert not sentinel.exists()
         assert db.get_album(db_id)["download_status"] == "not_downloaded"
