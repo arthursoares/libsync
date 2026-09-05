@@ -2,6 +2,12 @@
 
 All notable changes to Libsync are documented in this file. Release tags are annotated git tags; each section below mirrors the tag message for easy GitHub browsing.
 
+## Unreleased
+
+### Fixed
+
+- **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged.
+
 ## v0.0.6 — 2026-04-27
 
 Small UX polish release on top of v0.0.5.1.
