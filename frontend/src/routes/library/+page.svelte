@@ -8,6 +8,7 @@
     totalAlbums,
     currentSource,
     selectedAlbum,
+    selectAlbum,
     loadAlbumDetail,
     clearAlbumDetail,
   } from '$lib/stores/library';
@@ -154,7 +155,7 @@
 
   async function handleSelectAlbum(album: any) {
     if (album.source && album.source !== source) return;
-    $selectedAlbum = { ...album, source: album.source ?? source };
+    selectAlbum({ ...album, source: album.source ?? source });
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {

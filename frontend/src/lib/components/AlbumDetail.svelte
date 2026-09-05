@@ -36,7 +36,7 @@
 
   import { onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
-  import { loadAlbumDetail } from '$lib/stores/library';
+  import { loadAlbumDetail, captureAlbumSelection } from '$lib/stores/library';
   import { lastCompletedDownload, liveTrackStatuses, enqueueDownloads } from '$lib/stores/downloads';
 
   let {
@@ -222,6 +222,7 @@
     if (!album || !source) return;
     const target = album;
     const targetSource = source;
+    const isCurrentSelection = captureAlbumSelection(targetSource, target.id);
     markLoading = true;
     try {
       if (target.download_status === 'complete') {
@@ -231,7 +232,7 @@
       }
       // Reload via the store so the parent prop updates (mirrors the
       // download-complete refetch pattern already used in this component)
-      if (album === target && open) await loadAlbumDetail(targetSource, target.id);
+      if (open && isCurrentSelection()) await loadAlbumDetail(targetSource, target.id);
     } finally {
       markLoading = false;
     }

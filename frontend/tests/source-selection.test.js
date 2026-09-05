@@ -10,6 +10,17 @@ const { api } = await import('../src/lib/api/client.ts');
 const { currentSource, selectedAlbum } = await import('../src/lib/stores/library.ts');
 const { lastCompletedDownload } = await import('../src/lib/stores/downloads.ts');
 const { get } = await import('svelte/store');
+const { connectWebSocket } = await import('../src/lib/stores/websocket.ts');
+// Exercise the production socket dispatcher and album_status_changed handler.
+let testSocket;
+globalThis.WebSocket = class {
+  constructor() { testSocket = this; }
+};
+connectWebSocket();
+function albumStatus(id, status) {
+  testSocket.onmessage({ data: JSON.stringify({ type: 'album_status_changed',
+    data: { album_id: id, status } }) });
+}
 const album = (source) => ({ id: source === 'qobuz' ? 1 : 2, source,
   source_album_id: '123', title: `${source} album`, artist: 'Artist', tracks: [] });
 
@@ -126,5 +137,111 @@ test('AlbumDetail download and refresh use the displayed album source, not the g
     await unmount(component);
     document.body.replaceChildren();
     lastCompletedDownload.set(null);
+  }
+});
+
+test('Library applies pending detail tracks without overwriting a newer same-album status event', async () => {
+  const component = await start(Library);
+  const detail = deferred();
+  api.library.getAlbum = () => detail.promise;
+  try {
+    document.querySelector('.album-card').click();
+    await settle();
+    albumStatus(1, 'complete');
+    await settle();
+    detail.resolve({ ...album('qobuz'), download_status: 'not_downloaded',
+      tracks: [{ title: 'Loaded track', track_number: 1 }] });
+    await settle();
+    assert.ok(document.querySelector('.detail-panel.open'));
+    assert.match(document.querySelector('.detail-panel').textContent, /Loaded track/);
+    assert.equal(get(selectedAlbum).download_status, 'complete');
+    assert.ok(button('Unmark as downloaded'));
+  } finally {
+    await unmount(component);
+    document.body.replaceChildren();
+  }
+});
+
+for (const [initial, action, next] of [
+  ['not_downloaded', 'Mark as downloaded', 'complete'],
+  ['complete', 'Unmark as downloaded', 'not_downloaded'],
+]) {
+  test(`Library ${action} refreshes tracks when its status event precedes the HTTP response`, async () => {
+    const component = await start(Library);
+    const mutation = deferred();
+    let requests = 0;
+    api.library.getAlbum = async () => {
+      requests++;
+      return { ...album('qobuz'), download_status: requests === 1 ? initial : next,
+        tracks: requests === 1 ? [] : [{ title: 'Refreshed track', track_number: 1 }] };
+    };
+    api.library.markDownloaded = () => mutation.promise;
+    api.library.unmarkDownloaded = () => mutation.promise;
+    try {
+      document.querySelector('.album-card').click();
+      await settle();
+      button(action).click();
+      await settle();
+      albumStatus(1, next);
+      await settle();
+      mutation.resolve({});
+      await settle();
+      assert.equal(requests, 2, 'the same selection must still refresh after its object is patched');
+      assert.match(document.querySelector('.detail-panel').textContent, /Refreshed track/);
+      assert.equal(get(selectedAlbum).download_status, next);
+    } finally {
+      await unmount(component);
+      document.body.replaceChildren();
+    }
+  });
+}
+
+test('Library close and reopen of the same album invalidates the old detail lifecycle', async () => {
+  const component = await start(Library);
+  const old = deferred();
+  const reopened = deferred();
+  let requests = 0;
+  api.library.getAlbum = () => (++requests === 1 ? old.promise : reopened.promise);
+  try {
+    document.querySelector('.album-card').click();
+    await settle();
+    document.querySelector('.detail-close').click();
+    await settle();
+    document.querySelector('.album-card').click();
+    await settle();
+    old.resolve({ ...album('qobuz'), title: 'Old lifecycle' });
+    await settle();
+    assert.equal(document.querySelector('.detail-album-title').textContent, 'qobuz album');
+    reopened.resolve({ ...album('qobuz'), title: 'Reopened lifecycle' });
+    await settle();
+    assert.equal(document.querySelector('.detail-album-title').textContent, 'Reopened lifecycle');
+  } finally {
+    await unmount(component);
+    document.body.replaceChildren();
+  }
+});
+
+test('Library does not refresh a reopened selection when an old mark request completes', async () => {
+  const component = await start(Library);
+  const mutation = deferred();
+  let requests = 0;
+  api.library.getAlbum = async () => { requests++; return album('qobuz'); };
+  api.library.markDownloaded = () => mutation.promise;
+  try {
+    document.querySelector('.album-card').click();
+    await settle();
+    button('Mark as downloaded').click();
+    await settle();
+    document.querySelector('.detail-close').click();
+    await settle();
+    document.querySelector('.album-card').click();
+    await settle();
+    assert.equal(requests, 2);
+    mutation.resolve({});
+    await settle();
+    assert.equal(requests, 2, 'the previous selection lifecycle cannot refresh this one');
+  } finally {
+    await unmount(component);
+    document.body.replaceChildren();
   }
 });

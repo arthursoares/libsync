@@ -3,7 +3,7 @@
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
-  import { currentSource, selectedAlbum, loadAlbumDetail, clearAlbumDetail } from '$lib/stores/library';
+  import { currentSource, selectedAlbum, selectAlbum, loadAlbumDetail, clearAlbumDetail } from '$lib/stores/library';
   import { api } from '$lib/api/client';
   import { enqueueDownloads } from '$lib/stores/downloads';
 
@@ -161,7 +161,7 @@
   // ── Album detail ──
   async function handleSelectAlbum(album: any) {
     if (album.source && album.source !== source) return;
-    $selectedAlbum = { ...album, source: album.source ?? source };
+    selectAlbum({ ...album, source: album.source ?? source });
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {
