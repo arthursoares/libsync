@@ -9,12 +9,24 @@ export function clock(t) {
     return id;
   });
   t.mock.method(globalThis, 'clearTimeout', (key) => tasks.delete(key));
+  t.mock.method(globalThis, 'setInterval', (callback, delay, ...args) => {
+    tasks.set(++id, { at: now + delay, repeat: delay, callback: () => callback(...args) });
+    return id;
+  });
+  t.mock.method(globalThis, 'clearInterval', (key) => tasks.delete(key));
   return {
     advance(ms) {
-      now += ms;
-      for (const [key, task] of [...tasks]) {
-        if (task.at <= now && tasks.delete(key)) task.callback();
+      const end = now + ms;
+      while (true) {
+        const due = [...tasks].filter(([, task]) => task.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        const [key, task] = due;
+        now = task.at;
+        if (task.repeat) task.at += task.repeat;
+        else tasks.delete(key);
+        task.callback();
       }
+      now = end;
     },
     get pending() { return tasks.size; },
   };

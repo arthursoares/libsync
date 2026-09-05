@@ -27,10 +27,12 @@
     error?: string;
   }
 
-  let { result, onConfirm, onClose } = $props<{
+  let { result, onConfirm, onClose, onRetry, onRestart } = $props<{
     result: ScanResult;
     onConfirm: (albumId: number, folder: string) => Promise<void>;
     onClose: () => void;
+    onRetry?: () => void;
+    onRestart?: () => void;
   }>();
 
   let expanded = $state<{ auto: boolean; review: boolean; unmatched: boolean }>({
@@ -69,7 +71,13 @@
     {#if result.status === 'running'}
       <p>Scanning… {result.scanned ?? 0} / {result.total ?? '?'}</p>
     {:else if result.status === 'error'}
-      <p class="error">Scan failed: {result.error}</p>
+      <p class="error" role="alert">Scan failed: {result.error}</p>
+      {#if onRetry}
+        <button class="btn btn-secondary btn-sm" onclick={onRetry}>Retry status</button>
+      {/if}
+      {#if onRestart}
+        <button class="btn btn-secondary btn-sm" onclick={onRestart}>Start new scan</button>
+      {/if}
     {:else}
       <p class="summary">
         Scanned {result.scanned} folders ·

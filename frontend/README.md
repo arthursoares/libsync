@@ -83,6 +83,16 @@ against a real configuration just to test this failure path.
 
 There is currently no browser e2e harness wired into the frontend package.
 
+Queue cancellation, UUID completion events, and scan polling are covered by
+mounted tests with mocked API/socket traffic and a controllable clock. The layout
+test uses a fixed SvelteKit route and no-op navigation; it checks the real sidebar
+badge, not navigation or visual layout. Browser checks are still needed for
+responsive error-message wrapping and keyboard focus in Scan Review.
+
+Closing Scan Review stops monitoring and aborts the browser's pending requests;
+it does not cancel the backend scan job. A connection failure can be retried against
+the same job. A missing job requires starting a new scan.
+
 For a manual source-switch check in both Library and Search, select an album in
 multi-select mode, switch service, and confirm the batch bar and selection mode
 clear. Open a detail panel, delay its response in Network tools, switch service,
