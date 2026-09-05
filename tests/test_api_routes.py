@@ -105,6 +105,94 @@ class TestConfigRoutes:
         got = (await client.get("/api/config")).json()
         assert got["scan_sentinel_write_enabled"] is False
 
+    @pytest.mark.parametrize("source", ["qobuz", "tidal"])
+    async def test_unset_naming_defaults_match_effective_download_config(
+        self, client, app, source
+    ):
+        config = (await client.get("/api/config")).json()
+        kwargs = app.state.download_service._build_dl_config_kwargs(
+            source=source,
+            item={"force": False},
+            quality=3,
+            downloads_db=None,
+        )
+
+        assert config["folder_format"] == (
+            "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
+        )
+        assert config["track_format"] == (
+            "{tracknumber:02}. {artist} - {title}{explicit}"
+        )
+        assert kwargs["folder_format"] == config["folder_format"]
+        assert kwargs["track_format"] == config["track_format"]
+
+    async def test_naming_defaults_survive_get_patch_download_round_trip(
+        self, client, app
+    ):
+        config = (await client.get("/api/config")).json()
+        naming = {
+            "folder_format": config["folder_format"],
+            "track_format": config["track_format"],
+        }
+
+        response = await client.patch("/api/config", json=naming)
+
+        assert response.status_code == 200
+        assert {
+            "folder_format": response.json()["folder_format"],
+            "track_format": response.json()["track_format"],
+        } == naming
+        for source in ("qobuz", "tidal"):
+            kwargs = app.state.download_service._build_dl_config_kwargs(
+                source=source,
+                item={"force": False},
+                quality=3,
+                downloads_db=None,
+            )
+            assert kwargs["folder_format"] == naming["folder_format"]
+            assert kwargs["track_format"] == naming["track_format"]
+
+    async def test_explicit_stored_naming_formats_are_preserved(self, client, app):
+        app.state.db.set_config("folder_format", "custom/{albumartist}/{title}")
+        app.state.db.set_config("track_format", "{discnumber}-{tracknumber}-{title}")
+
+        config = (await client.get("/api/config")).json()
+
+        assert config["folder_format"] == "custom/{albumartist}/{title}"
+        assert config["track_format"] == "{discnumber}-{tracknumber}-{title}"
+        for source in ("qobuz", "tidal"):
+            kwargs = app.state.download_service._build_dl_config_kwargs(
+                source=source,
+                item={"force": False},
+                quality=3,
+                downloads_db=None,
+            )
+            assert kwargs["folder_format"] == config["folder_format"]
+            assert kwargs["track_format"] == config["track_format"]
+
+    async def test_explicit_empty_naming_formats_keep_existing_fallback_behavior(
+        self, client, app
+    ):
+        app.state.db.set_config("folder_format", "")
+        app.state.db.set_config("track_format", "")
+
+        config = (await client.get("/api/config")).json()
+        kwargs = app.state.download_service._build_dl_config_kwargs(
+            source="qobuz",
+            item={"force": False},
+            quality=3,
+            downloads_db=None,
+        )
+
+        assert config["folder_format"] == ""
+        assert config["track_format"] == ""
+        assert kwargs["folder_format"] == (
+            "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
+        )
+        assert kwargs["track_format"] == (
+            "{tracknumber:02}. {artist} - {title}{explicit}"
+        )
+
 
 class TestAuthRoutes:
     async def test_auth_status(self, client):
