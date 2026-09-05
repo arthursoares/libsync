@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
@@ -9,6 +9,7 @@
     currentSource,
     selectedAlbum,
     loadAlbumDetail,
+    clearAlbumDetail,
   } from '$lib/stores/library';
   import { api } from '$lib/api/client';
   import { enqueueDownloads } from '$lib/stores/downloads';
@@ -45,6 +46,7 @@
   let selectMode = $state(false);
   let selectedAlbums = $state<Set<string>>(new Set());
   let batchDownloading = $state(false);
+  let batchRequest = 0;
 
   function toggleSelectMode() {
     selectMode = !selectMode;
@@ -66,14 +68,16 @@
   }
 
   async function downloadSelected() {
-    if (selectedAlbums.size === 0) return;
+    if (selectedAlbums.size === 0 || batchDownloading) return;
+    const request = ++batchRequest;
     batchDownloading = true;
     try {
       await enqueueDownloads(source, [...selectedAlbums]);
+      if (request !== batchRequest) return;
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
-      batchDownloading = false;
+      if (request === batchRequest) batchDownloading = false;
     }
   }
 
@@ -149,11 +153,12 @@
 
 
   async function handleSelectAlbum(album: any) {
-    $selectedAlbum = album;
+    if (album.source && album.source !== source) return;
+    $selectedAlbum = { ...album, source: album.source ?? source };
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {
-        await loadAlbumDetail(source, album.id);
+        await loadAlbumDetail(album.source ?? source, album.id);
       } catch (err) {
         console.error('Failed to load album detail', err);
       }
@@ -162,6 +167,7 @@
 
   function closeDetail() {
     detailOpen = false;
+    clearAlbumDetail();
   }
 
   async function downloadAllNew() {
@@ -179,6 +185,21 @@
       console.error('Failed to queue downloads', err);
     }
   }
+
+  $effect(() => {
+    source;
+    untrack(() => {
+      selectedAlbums = new Set();
+      selectMode = false;
+      batchRequest++;
+      batchDownloading = false;
+      closeDetail();
+      $albums = [];
+      $totalAlbums = 0;
+    });
+  });
+
+  onDestroy(clearAlbumDetail);
 
   // Reload when source, sort, or filter changes.
   // IMPORTANT: the reload body reads `currentPage` indirectly (via

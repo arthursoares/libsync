@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { onEvent } from './websocket';
 
@@ -9,6 +9,15 @@ export const searchQuery = writable('');
 export const sortBy = writable('added_to_library_at');
 export const filterStatus = writable('all');
 export const selectedAlbum = writable<any | null>(null);
+let detailRequest = 0;
+
+export function clearAlbumDetail() {
+  detailRequest++;
+  selectedAlbum.set(null);
+}
+
+// Invalidate immediately, even before a mounted page's source effect runs.
+currentSource.subscribe(clearAlbumDetail);
 
 export async function loadAlbums(source: string, params?: Record<string, string>) {
   const data = await api.library.getAlbums(source, params);
@@ -17,8 +26,11 @@ export async function loadAlbums(source: string, params?: Record<string, string>
 }
 
 export async function loadAlbumDetail(source: string, id: number) {
+  const request = ++detailRequest;
+  const selection = get(selectedAlbum);
   const data = await api.library.getAlbum(source, id);
-  selectedAlbum.set(data);
+  if (request !== detailRequest || get(currentSource) !== source || get(selectedAlbum) !== selection) return;
+  selectedAlbum.set({ ...data, source });
 }
 
 // The backend publishes `album_status_changed` when an album is marked /
