@@ -6,6 +6,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 
 ### Fixed
 
+- **Tidal HiRes busy retry.** A busy response preserves the authorization handle and pasted redirect URL, allowing an explicit retry without restarting login.
 - **Scan polling lifecycle.** Scan status requests run sequentially and stop on close, navigation, or error. Missing jobs offer a fresh scan; connection failures offer an explicit status retry without repeated polling errors.
 - **Completion detail refresh.** Queue UUID completion events now resolve the album's source and catalog ID before refreshing matching open details; late progress cannot restore completed queue items.
 - **Cancellation feedback.** Individual and bulk cancellation now reload the canonical queue immediately, updating active counts without WebSocket traffic and ignoring late progress for cancelled items.
