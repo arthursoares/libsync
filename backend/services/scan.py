@@ -461,6 +461,19 @@ def _inspect_folder(folder: Path) -> tuple[bool, FolderMeta | None]:
     return False, read_folder_metadata(folder)
 
 
+async def _await_thread_mutation(function, /, *args, **kwargs):
+    """Wait for an already-started thread write before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            logger.exception("scan: thread mutation failed during cancellation")
+        raise
+
+
 async def run_scan(
     db,
     *,
@@ -469,6 +482,7 @@ async def run_scan(
     dedup_db_dir: str,
     event_bus,
     sentinel_write_enabled: bool = True,
+    stop_event: asyncio.Event | None = None,
 ) -> dict:
     """Walk the download path, classify each album folder, auto-mark
     exact matches, and return a review/unmatched report.
@@ -500,15 +514,25 @@ async def run_scan(
     unmatched: list[str] = []
     failed: list[dict] = []
     sentinel_skipped = 0
+    processed = 0
+    interrupted = False
 
     for i, folder in enumerate(folders, start=1):
+        if stop_event is not None and stop_event.is_set():
+            interrupted = True
+            break
         has_sentinel, meta = await asyncio.to_thread(_inspect_folder, folder)
+        if stop_event is not None and stop_event.is_set():
+            interrupted = True
+            break
         if has_sentinel:
             sentinel_skipped += 1
+            processed = i
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue
 
         if meta is None:
+            processed = i
             await event_bus.publish("scan_progress", {"scanned": i, "total": total})
             continue
 
@@ -523,6 +547,9 @@ async def run_scan(
                 if album_id is None:
                     raise ValueError("Auto-match did not include an album ID")
                 track_ids = await resolve_album_track_ids(db, clients, album_id)
+                if stop_event is not None and stop_event.is_set():
+                    interrupted = True
+                    break
                 if meta.track_count != len(track_ids):
                     album = db.get_album(album_id)
                     if album is None:
@@ -548,11 +575,12 @@ async def run_scan(
                             ],
                         }
                     )
+                    processed = i
                     await event_bus.publish(
                         "scan_progress", {"scanned": i, "total": total}
                     )
                     continue
-                await asyncio.to_thread(
+                await _await_thread_mutation(
                     mark_album_downloaded,
                     db,
                     album_id,
@@ -602,11 +630,12 @@ async def run_scan(
         else:
             unmatched.append(str(folder))
 
+        processed = i
         await event_bus.publish("scan_progress", {"scanned": i, "total": total})
 
     payload = {
-        "status": "complete",
-        "scanned": total,
+        "status": "interrupted" if interrupted else "complete",
+        "scanned": processed,
         "sentinel_skipped": sentinel_skipped,
         "skipped_dirs": skipped_dirs,
         "auto_matched": auto_matched,

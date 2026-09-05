@@ -92,7 +92,7 @@ class TestAutoSyncRevaluatedOnHotReload:
             )
             assert not sync_service._auto_sync_task.done()
         finally:
-            sync_service.stop_auto_sync()
+            await sync_service.stop_auto_sync()
             await asyncio.sleep(0)
 
     async def test_hot_reload_does_not_double_start_when_already_running(
@@ -135,5 +135,5 @@ class TestAutoSyncRevaluatedOnHotReload:
                 "hot-reload spawned a second auto-sync loop on top of the running one"
             )
         finally:
-            sync_service.stop_auto_sync()
+            await sync_service.stop_auto_sync()
             await asyncio.sleep(0)

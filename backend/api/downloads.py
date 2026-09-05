@@ -1,10 +1,13 @@
 """Downloads API routes."""
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from ..models.schemas import DownloadRequest
+from ..services.download import DownloadServiceStoppingError
 from ..services.paths import resolve_database_dir, resolve_downloads_root
 from ..services.sentinels import reconcile_sentinels
+from .lifecycle import require_work_admission
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
@@ -51,15 +54,19 @@ async def get_queue(request: Request):
 
 @router.post("/queue")
 async def enqueue(request: Request, body: DownloadRequest):
+    require_work_admission(request)
     service = request.app.state.download_service
     supplied = (
         {m.source_album_id: m.model_dump() for m in body.albums}
         if body.albums
         else None
     )
-    return await service.enqueue(
-        body.source, body.album_ids, force=body.force, supplied_metadata=supplied
-    )
+    try:
+        return await service.enqueue(
+            body.source, body.album_ids, force=body.force, supplied_metadata=supplied
+        )
+    except DownloadServiceStoppingError as error:
+        return JSONResponse({"error": str(error)}, status_code=503)
 
 
 @router.delete("/queue/{item_id}")
@@ -72,6 +79,7 @@ async def remove_from_queue(request: Request, item_id: str):
 @router.post("/scan")
 async def scan_downloads(request: Request):
     """Scan the download directory for .streamrip.json files and reconcile with DB."""
+    require_work_admission(request)
     db = request.app.state.db
     return await reconcile_sentinels(
         db,

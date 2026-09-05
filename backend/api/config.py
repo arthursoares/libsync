@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Request
 
 from ..models.schemas import AppConfig, ConfigUpdate
+from .lifecycle import require_work_admission
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 logger = logging.getLogger("streamrip")
@@ -34,6 +35,7 @@ async def get_config(request: Request) -> AppConfig:
 
 @router.patch("")
 async def update_config(request: Request, body: ConfigUpdate):
+    require_work_admission(request)
     db = request.app.state.db
     updates = body.model_dump(exclude_none=True)
 
@@ -76,8 +78,10 @@ async def update_config(request: Request, body: ConfigUpdate):
         from ..main import _start_auto_sync_if_enabled
 
         sync_service = request.app.state.sync_service
-        sync_service.stop_auto_sync()
-        _start_auto_sync_if_enabled(db, sync_service, request.app.state._clients_ref)
+        await sync_service.stop_auto_sync()
+        await _start_auto_sync_if_enabled(
+            db, sync_service, request.app.state._clients_ref
+        )
 
     return await get_config(request)
 
@@ -85,6 +89,7 @@ async def update_config(request: Request, body: ConfigUpdate):
 @router.post("/reset")
 async def reset_database(request: Request):
     """Reset library data and download history. Config and credentials are preserved."""
+    require_work_admission(request)
     db = request.app.state.db
     with db._connect() as conn:
         conn.execute("DELETE FROM albums")
@@ -141,4 +146,4 @@ async def _reload_clients(request: Request):
     # user toggled the setting again or restarted the app.
     from ..main import _start_auto_sync_if_enabled
 
-    _start_auto_sync_if_enabled(db, request.app.state.sync_service, clients)
+    await _start_auto_sync_if_enabled(db, request.app.state.sync_service, clients)

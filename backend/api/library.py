@@ -24,6 +24,7 @@ from ..services.tracks import (
     TrackIdentityError,
     resolve_album_track_ids,
 )
+from .lifecycle import require_work_admission
 
 logger = logging.getLogger("streamrip")
 
@@ -223,6 +224,7 @@ async def unmark_downloaded(request: Request, album_id: int):
 
 @router.post("/scan-fuzzy")
 async def start_scan(request: Request):
+    require_work_admission(request)
     app = request.app
     if app.state.active_scan_job is not None:
         return JSONResponse(
@@ -275,8 +277,15 @@ async def start_scan(request: Request):
                 dedup_db_dir=resolve_database_dir(db),
                 event_bus=tracked_bus,
                 sentinel_write_enabled=sentinel_enabled,
+                stop_event=app.state.scan_stop_event,
             )
             app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
+        except asyncio.CancelledError:
+            app.state.scan_jobs[job_id] = {
+                "status": "complete",
+                "result": {"status": "interrupted"},
+            }
+            raise
         except Exception:
             logger.exception("scan-fuzzy job %s failed", job_id)
             app.state.scan_jobs[job_id] = {
@@ -284,11 +293,12 @@ async def start_scan(request: Request):
                 "result": {"error": "Scan failed — see server logs"},
             }
         finally:
-            app.state.active_scan_job = None
+            if app.state.active_scan_job == job_id:
+                app.state.active_scan_job = None
 
     task = asyncio.create_task(runner())
-    # Keep a strong reference so the task is not garbage-collected before completion.
-    app.state.scan_jobs[job_id]["_task"] = task
+    app.state.scan_tasks.add(task)
+    task.add_done_callback(app.state.scan_tasks.discard)
     return {"job_id": job_id}
 
 

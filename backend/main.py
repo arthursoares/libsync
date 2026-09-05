@@ -1,5 +1,6 @@
 """FastAPI application for streamrip web UI."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -111,7 +112,7 @@ def _parse_auto_sync_interval(value: str | None) -> int:
         return _AUTO_SYNC_DEFAULT_SECONDS
 
 
-def _start_auto_sync_if_enabled(
+async def _start_auto_sync_if_enabled(
     db: AppDatabase, sync_service: "SyncService", clients: dict
 ) -> None:
     """If auto_sync_enabled is True in the DB, start the loop.
@@ -122,7 +123,7 @@ def _start_auto_sync_if_enabled(
 
     Idempotent: if a loop is already running for this service, returns
     without re-starting it.  Callers that *want* a restart (e.g. interval
-    change in settings) must call ``sync_service.stop_auto_sync()`` first.
+    change in settings) must await ``sync_service.stop_auto_sync()`` first.
     """
     enabled_raw = db.get_config("auto_sync_enabled") or "false"
     if enabled_raw.lower() not in ("true", "1", "yes"):
@@ -149,7 +150,7 @@ def _start_auto_sync_if_enabled(
         source,
         interval_seconds,
     )
-    sync_service.start_auto_sync(source, interval_seconds, download_new=True)
+    await sync_service.start_auto_sync(source, interval_seconds, download_new=True)
 
 
 async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
@@ -259,6 +260,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "Reset %d albums stuck in queued/downloading from a previous run",
             reset_count,
         )
+    interrupted_syncs = db.interrupt_running_sync_runs()
+    if interrupted_syncs > 0:
+        logger.info(
+            "Marked %d sync runs interrupted from a previous process",
+            interrupted_syncs,
+        )
 
     event_bus = EventBus()
 
@@ -297,41 +304,61 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Open client sessions — both Qobuz and Tidal SDK clients are
-        # async context managers.
-        for name, client in clients.items():
-            try:
-                await client.__aenter__()
-                logger.info("Opened session for %s", name)
-            except Exception:
-                logger.exception("Failed to initialize %s", name)
+        app.state.shutting_down = False
+        app.state.scan_stop_event.clear()
+        try:
+            # Open client sessions — both Qobuz and Tidal SDK clients are
+            # async context managers.
+            for name, client in clients.items():
+                try:
+                    await client.__aenter__()
+                    logger.info("Opened session for %s", name)
+                except Exception:
+                    logger.exception("Failed to initialize %s", name)
 
-        # Resolve the real Qobuz app_id + secret from the live bundle.
-        # This also corrects the X-App-Id session header if the cached
-        # app_id was stale.
-        qobuz = clients.get("qobuz")
-        if qobuz:
-            await _resolve_qobuz_credentials(db, qobuz)
+            # Resolve the real Qobuz app_id + secret from the live bundle.
+            qobuz = clients.get("qobuz")
+            if qobuz:
+                await _resolve_qobuz_credentials(db, qobuz)
 
-        # Start auto-sync loop if enabled in the DB
-        _start_auto_sync_if_enabled(db, sync_service, clients)
+            await _start_auto_sync_if_enabled(db, sync_service, clients)
+            yield
+        finally:
+            # Flip admission synchronously before any shutdown await.
+            app.state.shutting_down = True
+            app.state.scan_stop_event.set()
+            for name, begin_shutdown in (
+                ("sync service", sync_service.begin_shutdown),
+                ("download service", download_service.begin_shutdown),
+            ):
+                try:
+                    begin_shutdown()
+                except Exception:
+                    logger.exception("Failed to signal %s shutdown", name)
 
-        yield
+            # A broken cleanup stage must not leak unrelated owned tasks or
+            # current client sessions, nor replace an exception from `yield`.
+            for name, shutdown in (
+                ("sync service", sync_service.shutdown),
+                ("download service", download_service.shutdown),
+            ):
+                try:
+                    await shutdown()
+                except Exception:
+                    logger.exception("Failed to drain %s", name)
 
-        # Stop auto-sync before shutting down
-        sync_service.stop_auto_sync()
+            scan_tasks = tuple(app.state.scan_tasks)
+            if scan_tasks:
+                logger.info("Shutdown waiting for %d scan task(s)", len(scan_tasks))
+                await asyncio.gather(*scan_tasks, return_exceptions=True)
 
-        # Cleanup sessions — use the live reference, not the captured
-        # `clients` local, since `_reload_clients` swaps in a new dict on
-        # `app.state._clients_ref` after credential hot-reload (see
-        # backend/api/config.py:_reload_clients). Closing the stale local
-        # would re-close already-closed sessions and leak the current ones.
-        for client in app.state._clients_ref.values():
-            try:
-                await client.__aexit__(None, None, None)
-            except Exception:
-                pass
-        logger.info("streamrip web UI shutting down")
+            # Use the live reference because credential hot-reload swaps the map.
+            for name, client in tuple(app.state._clients_ref.items()):
+                try:
+                    await client.__aexit__(None, None, None)
+                except Exception:
+                    logger.exception("Failed to close %s client", name)
+            logger.info("streamrip web UI shutting down")
 
     app = FastAPI(title="streamrip", version="3.0.0", lifespan=lifespan)
     app.state.db = db
@@ -340,7 +367,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.download_service = download_service
     app.state.sync_service = sync_service
     app.state._clients_ref = clients
+    app.state.shutting_down = False
     app.state.scan_jobs = {}  # job_id → {"status": ..., "result": ...}
+    app.state.scan_tasks = set()
+    app.state.scan_stop_event = asyncio.Event()
     app.state.active_scan_job = None  # one-at-a-time guard
 
     @app.get("/api/health")
