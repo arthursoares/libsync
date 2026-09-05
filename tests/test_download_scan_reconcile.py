@@ -6,12 +6,13 @@ import sqlite3
 import threading
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.main import create_app
+from backend.services.download import DownloadService
 
 
 def _sentinel(folder, **overrides):
@@ -40,7 +41,8 @@ def _catalog_client(source, specs):
         spec = specs[str(source_album_id)]
         if isinstance(spec, Exception):
             raise spec
-        count, returned = spec
+        count, returned, *extra = spec
+        isrcs = extra[0] if extra else None
         ids = [f"{source_album_id}-t{i}" for i in range(1, returned + 1)]
         if source == "qobuz":
             album = SimpleNamespace(tracks_count=count)
@@ -53,7 +55,7 @@ def _catalog_client(source, specs):
                     disc_number=1,
                     duration=180,
                     explicit=False,
-                    isrc=f"ISRC-{track_id}",
+                    isrc=isrcs[i - 1] if isrcs else f"ISRC-{track_id}",
                 )
                 for i, track_id in enumerate(ids, start=1)
             ]
@@ -69,7 +71,7 @@ def _catalog_client(source, specs):
                     volume_number=1,
                     duration=180,
                     explicit=False,
-                    isrc=f"ISRC-{track_id}",
+                    isrc=isrcs[i - 1] if isrcs else f"ISRC-{track_id}",
                 )
                 for i, track_id in enumerate(ids, start=1)
             ]
@@ -432,7 +434,7 @@ async def test_duplicate_sentinel_track_identities_are_rejected(
     assert _dedup_ids(tmp_path / "data" / "downloads.db") == set()
 
 
-async def test_duplicate_local_tag_identities_are_rejected(
+async def test_local_isrc_multiplicity_must_match_catalog(
     app, client, tmp_path, monkeypatch
 ):
     import backend.services.sentinels as sentinels
@@ -451,7 +453,7 @@ async def test_duplicate_local_tag_identities_are_rejected(
     response = await client.post("/api/downloads/scan")
 
     assert response.json()["reconciled"] == 0
-    assert "identity tags are duplicated" in response.json()["failures"][0]["error"]
+    assert "do not match" in response.json()["failures"][0]["error"]
     assert _dedup_ids(tmp_path / "data" / "downloads.db") == set()
 
 
@@ -499,3 +501,139 @@ async def test_invalid_or_missing_timestamp_uses_current_utc_fallback(
     downloaded_at = datetime.fromisoformat(album["downloaded_at"])
     assert downloaded_at.tzinfo is not None
     assert downloaded_at.utcoffset() is not None
+
+
+@pytest.mark.parametrize("source", ["qobuz", "tidal"])
+@pytest.mark.parametrize("env_mode", ["unset", "different"])
+async def test_downloader_scan_and_unmark_share_explicit_database_dedup_dir(
+    app, client, tmp_path, monkeypatch, source, env_mode
+):
+    explicit_db_dir = tmp_path / "data"
+    if env_mode == "unset":
+        monkeypatch.delenv("STREAMRIP_DB_PATH", raising=False)
+    else:
+        monkeypatch.setenv(
+            "STREAMRIP_DB_PATH", str(tmp_path / "different" / "streamrip.db")
+        )
+
+    root = tmp_path / "music"
+    folder = root / source.title()
+    source_album_id = f"{source}-shared-path"
+    _audio(folder)
+    _sentinel(folder, source=source, album_id=source_album_id)
+    app.state.db.set_config("downloads_path", str(root))
+    sdk_client = _install_client(app, source, {source_album_id: (1, 1)})
+    album_id = app.state.db.upsert_album(
+        source, source_album_id, "Title", "Artist", track_count=1
+    )
+    service = DownloadService(
+        app.state.db,
+        app.state.event_bus,
+        clients={source: sdk_client},
+        download_path=str(root),
+    )
+    item = {
+        "id": "queue-1",
+        "album_db_id": album_id,
+        "source": source,
+        "source_album_id": source_album_id,
+        "title": "Title",
+        "artist": "Artist",
+        "cover_url": None,
+        "track_count": 1,
+        "tracks_done": 0,
+        "bytes_done": 0,
+        "bytes_total": 0,
+        "speed": 0.0,
+        "status": "downloading",
+        "force": False,
+    }
+    captured = {}
+    result = SimpleNamespace(
+        total=1,
+        successful=1,
+        success_rate=1.0,
+        title="Title",
+        artist="Artist",
+        tracks=[],
+    )
+
+    def fake_downloader(_client, config, **_callbacks):
+        captured["config"] = config
+        downloader = MagicMock()
+        downloader.download = AsyncMock(return_value=result)
+        return downloader
+
+    with patch(f"{source}.AlbumDownloader", new=fake_downloader):
+        await service._download_album(item)
+
+    filename = "downloads.db" if source == "qobuz" else "downloads-tidal.db"
+    expected_dedup = explicit_db_dir / filename
+    assert captured["config"].downloads_db_path == str(expected_dedup)
+
+    scan_response = await client.post("/api/downloads/scan")
+    assert scan_response.json()["reconciled"] == 1
+    assert _dedup_ids(expected_dedup) == {f"{source_album_id}-t1"}
+
+    unmark = await client.post(f"/api/library/albums/{album_id}/unmark-downloaded")
+    assert unmark.status_code == 200
+    assert _dedup_ids(expected_dedup) == set()
+
+
+async def test_invalid_utf8_sentinel_isolated_from_healthy_album(
+    app, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "music"
+    malformed = root / "Malformed"
+    _audio(malformed)
+    (malformed / ".streamrip.json").write_bytes(b"\xff\xfe\xfa")
+    healthy = root / "Healthy"
+    _audio(healthy)
+    _sentinel(healthy, album_id="healthy")
+    monkeypatch.setenv("STREAMRIP_DOWNLOADS_PATH", str(root))
+    _install_client(app, "qobuz", {"healthy": (1, 1)})
+
+    response = await client.post("/api/downloads/scan")
+
+    assert response.status_code == 200
+    assert response.json()["scanned"] == 2
+    assert response.json()["reconciled"] == 1
+    assert len(response.json()["failures"]) == 1
+    assert response.json()["failures"][0]["folder"] == str(malformed.resolve())
+    assert (
+        app.state.db.get_album_by_source_id("qobuz", "healthy")["download_status"]
+        == "complete"
+    )
+    assert _dedup_ids(tmp_path / "data" / "downloads.db") == {"healthy-t1"}
+
+
+def _mock_local_isrcs(monkeypatch, values):
+    import backend.services.sentinels as sentinels
+
+    tagged_files = []
+    for value in values:
+        tagged_file = MagicMock()
+        tagged_file.tags.get.return_value = [value]
+        tagged_files.append(tagged_file)
+    monkeypatch.setattr(sentinels.mutagen, "File", MagicMock(side_effect=tagged_files))
+
+
+async def test_repeated_catalog_isrc_for_distinct_tracks_reconciles(
+    app, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "music"
+    folder = root / "Repeated Recording"
+    _audio(folder, "01.flac")
+    _audio(folder, "02.flac")
+    _sentinel(folder, album_id="same-isrc", tracks_count=2)
+    monkeypatch.setenv("STREAMRIP_DOWNLOADS_PATH", str(root))
+    _install_client(app, "qobuz", {"same-isrc": (2, 2, ["SAME", "SAME"])})
+    _mock_local_isrcs(monkeypatch, ["SAME", "SAME"])
+
+    response = await client.post("/api/downloads/scan")
+
+    assert response.json() == {"scanned": 1, "reconciled": 1, "failures": []}
+    assert _dedup_ids(tmp_path / "data" / "downloads.db") == {
+        "same-isrc-t1",
+        "same-isrc-t2",
+    }

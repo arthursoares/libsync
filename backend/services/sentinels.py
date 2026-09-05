@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,7 +130,12 @@ def discover_sentinels(
                 payload = json.load(file)
             if not isinstance(payload, dict):
                 raise SentinelValidationError("Sentinel JSON must be an object")
-        except (OSError, json.JSONDecodeError, SentinelValidationError) as error:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            SentinelValidationError,
+        ) as error:
             failures.append(
                 {
                     "folder": str(actual_folder),
@@ -299,15 +304,15 @@ def validate_local_album(
     if tagged_isrcs:
         if len(tagged_isrcs) != expected:
             raise SentinelValidationError("Local track identity tags are incomplete")
-        if len(set(tagged_isrcs)) != expected:
-            raise SentinelValidationError("Local track identity tags are duplicated")
         current_ids = set(track_ids)
-        catalog_isrcs = {
+        catalog_isrcs = [
             str(track["isrc"]).strip().casefold()
             for track in catalog_tracks
             if track["source_track_id"] in current_ids and track.get("isrc")
-        }
-        if len(catalog_isrcs) == expected and set(tagged_isrcs) != catalog_isrcs:
+        ]
+        if len(catalog_isrcs) == expected and Counter(tagged_isrcs) != Counter(
+            catalog_isrcs
+        ):
             raise SentinelValidationError(
                 "Local track identity tags do not match the current catalog"
             )

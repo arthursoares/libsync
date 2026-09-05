@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .paths import resolve_database_dir
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
@@ -477,12 +478,7 @@ class DownloadService:
         # Qobuz keeps the legacy name to preserve existing dedup state on disk.
         downloads_db = None
         if not item.get("force"):
-            db_dir = (
-                os.path.dirname(
-                    os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
-                )
-                or "data"
-            )
+            db_dir = resolve_database_dir(self.db)
             db_filename = (
                 "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
             )
