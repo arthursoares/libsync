@@ -6,6 +6,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 
 ### Fixed
 
+- **Sync selection effect loop.** Initial selection notifications no longer track parent state; deselection stays intact and replacement sync results reseed once.
 - **Source-scoped selections and details.** Switching services clears Library and Search selections and detail panels; album actions use the album's source, and late detail responses cannot replace a newer selection.
 - **Detail refresh during status updates.** Same-album status events no longer discard pending track details or suppress mark/unmark refreshes; newer status is preserved when a pending detail response arrives.
 - **Settings load protection.** Save stays disabled until configuration loads successfully, with a visible retry action on failure and no partial form hydration during auth checks.
