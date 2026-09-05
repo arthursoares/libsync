@@ -1,13 +1,9 @@
 """Tests for the /api/auth routes: Qobuz OAuth (redirect + JSON), Tidal
 device-code, and Tidal PKCE.
 
-Every route that persists credentials also calls `_reload_clients`
-(backend/api/config.py) to hot-reload the SDK clients from the new
-config. That hot-reload path (real client construction, session open,
-Qobuz secret resolution) is already covered by tests/test_client_init.py
-and tests/test_auto_sync_hotreload.py, so here it's stubbed to an
-AsyncMock everywhere via an autouse fixture -- these tests are only
-about what each route does to the request/response and the config DB.
+Every route that persists credentials uses the common safe activation path.
+These tests replace only SDK construction and signing resolution, so auth
+exchange, atomic persistence, validation, and publication still execute.
 
 The Qobuz/Tidal SDK functions each route calls are imported *inside* the
 route bodies (``from qobuz.auth import exchange_code`` etc.), so they must
@@ -24,7 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from qobuz.auth import APP_ID as QOBUZ_OAUTH_APP_ID
 
 from backend.api.auth import _pkce_pending
-from backend.main import _init_clients, create_app
+from backend.main import create_app
 
 
 @pytest.fixture
@@ -41,12 +37,24 @@ async def client(app):
 
 
 @pytest.fixture(autouse=True)
-def no_real_client_reload(monkeypatch):
-    """Every successful auth route calls _reload_clients() to hot-reload
-    the SDK clients; stub it out everywhere so no test attempts a real
-    QobuzClient/TidalClient session (network calls, spoofer HTTP, etc.)."""
+def no_real_client_activation(monkeypatch):
+    """Use validating fake clients while exercising real activation logic."""
+
+    def build_client(source, config, *, strict=False):
+        token_key = "qobuz_token" if source == "qobuz" else "tidal_access_token"
+        token = config.get(token_key) if isinstance(config, dict) else None
+        if not token:
+            return None
+        candidate = Mock()
+        candidate.__aenter__ = AsyncMock(return_value=candidate)
+        candidate.__aexit__ = AsyncMock(return_value=None)
+        candidate.favorites = Mock()
+        candidate.favorites.get_albums = AsyncMock(return_value=Mock(items=[]))
+        return candidate
+
+    monkeypatch.setattr("backend.main._init_client", build_client)
     monkeypatch.setattr(
-        "backend.api.config._reload_clients", AsyncMock(return_value=None)
+        "backend.main._resolve_qobuz_credentials", AsyncMock(return_value={})
     )
 
 
@@ -376,12 +384,7 @@ class TestTidalPoll:
         assert db.get_config("tidal_token_expiry") == "123456.0"
         assert db.get_config("tidal_auth_method") == "device_code"
 
-        tidal_client = Mock(return_value=object())
-        monkeypatch.setattr("tidal.TidalClient", tidal_client)
-        initialized = _init_clients(db)
-
-        assert initialized["tidal"] is tidal_client.return_value
-        assert tidal_client.call_args.kwargs["auth_method"] == "device_code"
+        assert "tidal" in app.state._clients_ref
 
 
 class TestTidalPkce:
@@ -416,6 +419,27 @@ class TestTidalPkce:
         )
         assert resp.status_code == 400
         assert "Unknown or expired PKCE handle" in resp.json()["detail"]
+
+    async def test_busy_pkce_completion_does_not_consume_handle(
+        self, client, app, monkeypatch
+    ):
+        data = await self._start(client, monkeypatch)
+        handle = data["handle"]
+        exchange = AsyncMock()
+        monkeypatch.setattr("tidal.auth.exchange_pkce_code", exchange)
+
+        with app.state.client_operations.operation({"tidal"}):
+            resp = await client.post(
+                "/api/auth/tidal/pkce-complete",
+                json={
+                    "handle": handle,
+                    "redirect_url": "https://tidal.com/android/login/auth?code=1",
+                },
+            )
+
+        assert resp.status_code == 409
+        assert handle in _pkce_pending
+        exchange.assert_not_awaited()
 
     async def test_pkce_complete_success_persists_tokens_and_auth_method(
         self, client, app, monkeypatch

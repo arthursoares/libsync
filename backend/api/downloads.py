@@ -7,7 +7,7 @@ from ..models.schemas import DownloadRequest
 from ..services.download import DownloadServiceStoppingError
 from ..services.paths import resolve_database_dir, resolve_downloads_root
 from ..services.sentinels import reconcile_sentinels
-from .lifecycle import require_work_admission
+from .lifecycle import client_operation, require_work_admission
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 DOWNLOAD_SERVICE_STOPPING_MESSAGE = "Download service is shutting down"
@@ -63,9 +63,13 @@ async def enqueue(request: Request, body: DownloadRequest):
         else None
     )
     try:
-        return await service.enqueue(
-            body.source, body.album_ids, force=body.force, supplied_metadata=supplied
-        )
+        with client_operation(request, {body.source}):
+            return await service.enqueue(
+                body.source,
+                body.album_ids,
+                force=body.force,
+                supplied_metadata=supplied,
+            )
     except DownloadServiceStoppingError:
         return JSONResponse(
             {"error": DOWNLOAD_SERVICE_STOPPING_MESSAGE}, status_code=503
@@ -84,13 +88,14 @@ async def scan_downloads(request: Request):
     """Scan the download directory for .streamrip.json files and reconcile with DB."""
     require_work_admission(request)
     db = request.app.state.db
-    return await reconcile_sentinels(
-        db,
-        request.app.state._clients_ref,
-        request.app.state.event_bus,
-        download_root=resolve_downloads_root(db),
-        dedup_db_dir=resolve_database_dir(db),
-    )
+    with client_operation(request, {"qobuz", "tidal"}):
+        return await reconcile_sentinels(
+            db,
+            request.app.state._clients_ref,
+            request.app.state.event_bus,
+            download_root=resolve_downloads_root(db),
+            dedup_db_dir=resolve_database_dir(db),
+        )
 
 
 @router.post("/cancel")

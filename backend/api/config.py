@@ -2,9 +2,15 @@
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..models.schemas import AppConfig, ConfigUpdate
+from ..services.client_activation import (
+    ClientActivationShuttingDownError,
+    ClientReloadBusyError,
+    activate_config_updates,
+    affected_sources_for_updates,
+)
 from .lifecycle import require_work_admission
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -36,52 +42,35 @@ async def get_config(request: Request) -> AppConfig:
 @router.patch("")
 async def update_config(request: Request, body: ConfigUpdate):
     require_work_admission(request)
-    db = request.app.state.db
-    updates = body.model_dump(exclude_none=True)
+    requested = body.model_dump(exclude_none=True)
+    affected = affected_sources_for_updates(requested)
 
-    # Manual qobuz_token paste path: if the token in the PATCH body differs
-    # from what's currently stored AND the user didn't also provide an
-    # explicit qobuz_app_id, assume it's a manually-extracted web player
-    # token and pin qobuz_app_id=798273057.  That matches the spoofer's
-    # signing secret, which is the only secret we have without an override.
-    #
-    # OAuth-issued tokens use a different code path
-    # (/api/auth/qobuz/oauth-from-url) that atomically sets qobuz_app_id
-    # to the OAuth app, so this branch never fires for OAuth flows.
-    if "qobuz_token" in updates and not updates.get("qobuz_app_id"):
-        new_token = updates["qobuz_token"] or ""
-        old_token = db.get_config("qobuz_token") or ""
-        if new_token and new_token != old_token:
-            updates["qobuz_app_id"] = "798273057"
-            logger.info(
-                "Detected manual qobuz_token change — pinning qobuz_app_id=798273057 "
-                "(web player; required for download signing)"
-            )
+    async def prepare_updates():
+        updates = dict(requested)
+        # This decision is made under the writer reservation so two token
+        # updates cannot derive an app ID from stale config.
+        if "qobuz_token" in updates and not updates.get("qobuz_app_id"):
+            new_token = updates["qobuz_token"] or ""
+            old_token = request.app.state.db.get_config("qobuz_token") or ""
+            if new_token and new_token != old_token:
+                updates["qobuz_app_id"] = "798273057"
+                logger.info(
+                    "Detected manual qobuz_token change — pinning "
+                    "qobuz_app_id=798273057"
+                )
+        return updates
 
-    for key, value in updates.items():
-        db.set_config(key, str(value))
-
-    # Hot-reload clients if credentials changed
-    cred_keys = {
-        "qobuz_token",
-        "qobuz_user_id",
-        "qobuz_app_id",
-        "qobuz_app_secret",
-        "tidal_access_token",
-    }
-    if cred_keys & set(updates.keys()):
-        await _reload_clients(request)
-
-    # Restart the auto-sync loop if its config changed
-    auto_sync_keys = {"auto_sync_enabled", "auto_sync_interval"}
-    if auto_sync_keys & set(updates.keys()):
-        from ..main import _start_auto_sync_if_enabled
-
-        sync_service = request.app.state.sync_service
-        await sync_service.stop_auto_sync()
-        await _start_auto_sync_if_enabled(
-            db, sync_service, request.app.state._clients_ref
+    try:
+        await activate_config_updates(
+            request.app, prepare_updates, affected_sources=affected
         )
+    except ClientReloadBusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ClientActivationShuttingDownError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Config activation failed")
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     return await get_config(request)
 
@@ -99,51 +88,3 @@ async def reset_database(request: Request):
     return {
         "message": "Library, tracks, and sync history cleared. Config and credentials preserved. Files on disk unchanged."
     }
-
-
-async def _reload_clients(request: Request):
-    """Re-initialize streaming clients after credential changes."""
-    from ..main import _init_clients
-
-    db = request.app.state.db
-
-    # Close existing sessions (all clients are SDK async context managers now).
-    old_clients = getattr(request.app.state, "_clients_ref", {})
-    for client in old_clients.values():
-        try:
-            await client.__aexit__(None, None, None)
-        except Exception:
-            pass
-
-    # Create new clients and open their sessions
-    clients = _init_clients(db)
-    for name, client in clients.items():
-        try:
-            await client.__aenter__()
-            logger.info("Hot-reloaded %s (session opened)", name)
-        except Exception:
-            logger.exception("Failed to initialize %s during hot-reload", name)
-
-    # Resolve the real Qobuz app_id and secret.  This also corrects
-    # the X-App-Id session header if the client was built with a stale
-    # cached app_id (see _resolve_qobuz_credentials docstring in main.py).
-    qobuz = clients.get("qobuz")
-    if qobuz:
-        from ..main import _resolve_qobuz_credentials
-
-        await _resolve_qobuz_credentials(db, qobuz)
-
-    # Update all service references
-    request.app.state.library_service.clients = clients
-    request.app.state.download_service.clients = clients
-    request.app.state.sync_service.clients = clients
-    request.app.state._clients_ref = clients
-
-    # Re-evaluate auto-sync now that a source may have just become available.
-    # Common path: user enables auto-sync before authenticating; the initial
-    # _start_auto_sync_if_enabled at startup skipped because clients was
-    # empty.  Without this re-check the loop would never start until the
-    # user toggled the setting again or restarted the app.
-    from ..main import _start_auto_sync_if_enabled
-
-    await _start_auto_sync_if_enabled(db, request.app.state.sync_service, clients)

@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from ..models.database import AppDatabase
+from .client_activation import ClientReloadBusyError
 from .event_bus import EventBus
 from .tasks import await_task_completion
 
@@ -22,12 +23,14 @@ class SyncService:
         clients: dict,
         library_service,
         download_service=None,
+        client_operations=None,
     ):
         self.db = db
         self.event_bus = event_bus
         self.clients = clients
         self.library_service = library_service
         self.download_service = download_service
+        self.client_operations = client_operations
         self._auto_sync_task: asyncio.Task | None = None
         self._sync_tasks: set[asyncio.Task] = set()
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -35,6 +38,13 @@ class SyncService:
 
     async def get_diff(self, source: str) -> dict:
         """Compare streaming library against local database."""
+        if self.client_operations is not None:
+            with self.client_operations.operation({source}):
+                return await self._get_diff(source)
+        return await self._get_diff(source)
+
+    async def _get_diff(self, source: str) -> dict:
+        """Implementation for a caller holding source-operation admission."""
         client = self.clients.get(source)
         # Both SDK clients open their transport via __aenter__ in lifespan
         # and don't expose ``logged_in`` — treat presence of the client as
@@ -95,6 +105,14 @@ class SyncService:
         """
         if self._stopping:
             raise SyncServiceStoppingError("Sync service is shutting down")
+
+        if self.client_operations is not None:
+            with self.client_operations.operation({source}):
+                return await self._run_sync(source, download_new)
+        return await self._run_sync(source, download_new)
+
+    async def _run_sync(self, source: str, download_new: bool = False) -> dict:
+        """Implementation for a caller holding source-operation admission."""
 
         current = asyncio.current_task()
         if current is not None:
@@ -201,6 +219,11 @@ class SyncService:
                     await self.run_sync(source, download_new=download_new)
                 except asyncio.CancelledError:
                     raise
+                except ClientReloadBusyError:
+                    logger.info(
+                        "Auto-sync deferred while %s credentials are activating",
+                        source,
+                    )
                 except Exception:
                     logger.exception("Auto-sync failed for %s", source)
 

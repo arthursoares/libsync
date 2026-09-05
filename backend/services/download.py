@@ -101,12 +101,14 @@ class DownloadService:
         clients: dict,
         download_path: str,
         max_connections: int = 6,
+        client_operations=None,
     ):
         self.db = db
         self.event_bus = event_bus
         self.clients = clients
         self.download_path = download_path
         self.max_connections = max_connections
+        self.client_operations = client_operations
         self._queue: list[dict[str, Any]] = []
         self._cancel_requested: set[str] = set()
         self._worker_task: asyncio.Task | None = None
@@ -180,6 +182,28 @@ class DownloadService:
         }
 
     async def enqueue(
+        self,
+        source: str,
+        album_ids: list[str],
+        force: bool = False,
+        supplied_metadata: dict[str, dict] | None = None,
+    ) -> list[dict]:
+        if self.client_operations is not None:
+            with self.client_operations.operation({source}):
+                return await self._enqueue(
+                    source,
+                    album_ids,
+                    force=force,
+                    supplied_metadata=supplied_metadata,
+                )
+        return await self._enqueue(
+            source,
+            album_ids,
+            force=force,
+            supplied_metadata=supplied_metadata,
+        )
+
+    async def _enqueue(
         self,
         source: str,
         album_ids: list[str],
@@ -293,6 +317,15 @@ class DownloadService:
 
     def get_queue(self) -> list[dict]:
         return list(self._queue)
+
+    def has_unfinished_for_sources(self, sources) -> bool:
+        """Return whether queued/current work still owns a source client."""
+        source_set = set(sources)
+        return any(
+            item["source"] in source_set
+            and item["status"] in ("pending", "downloading")
+            for item in self._queue
+        )
 
     def _prune_queue(self) -> None:
         """Bound the in-memory queue after an item reaches a terminal state.
@@ -445,7 +478,11 @@ class DownloadService:
                 )
 
                 try:
-                    await self._download_album(item)
+                    if self.client_operations is None:
+                        await self._download_album(item)
+                    else:
+                        with self.client_operations.operation({item["source"]}):
+                            await self._download_album(item)
 
                     # Re-check cancellation: the user may have cancelled while
                     # _download_album was running. The SDK doesn't support mid-

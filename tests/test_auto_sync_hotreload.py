@@ -66,11 +66,14 @@ class TestAutoSyncRevaluatedOnHotReload:
         # resolver which would try real HTTP.
         mock_client = _mock_qobuz_client()
         monkeypatch.setattr(
-            "backend.main._init_clients", lambda db: {"qobuz": mock_client}
+            "backend.main._init_client",
+            lambda source, config, strict=False: (
+                mock_client if source == "qobuz" else None
+            ),
         )
         monkeypatch.setattr(
             "backend.main._resolve_qobuz_credentials",
-            AsyncMock(return_value=None),
+            AsyncMock(return_value={}),
         )
 
         # Trigger hot-reload via a credential write — this is what every
@@ -103,11 +106,14 @@ class TestAutoSyncRevaluatedOnHotReload:
 
         mock_client = _mock_qobuz_client()
         monkeypatch.setattr(
-            "backend.main._init_clients", lambda db: {"qobuz": mock_client}
+            "backend.main._init_client",
+            lambda source, config, strict=False: (
+                mock_client if source == "qobuz" else None
+            ),
         )
         monkeypatch.setattr(
             "backend.main._resolve_qobuz_credentials",
-            AsyncMock(return_value=None),
+            AsyncMock(return_value={}),
         )
 
         # First credential write: clients become available, auto-sync starts.
@@ -123,17 +129,18 @@ class TestAutoSyncRevaluatedOnHotReload:
         first_task = sync_service._auto_sync_task
         assert first_task is not None and not first_task.done()
 
-        # Second credential write (e.g. token refresh) — auto-sync was
-        # already running; the same task object should remain.
+        # A reload replaces the scheduler only after activation and leaves
+        # exactly one live loop.
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             await client.patch("/api/config", json={"qobuz_token": "tok-2"})
 
         try:
-            assert sync_service._auto_sync_task is first_task, (
-                "hot-reload spawned a second auto-sync loop on top of the running one"
-            )
+            assert first_task.done()
+            assert sync_service._auto_sync_task is not first_task
+            assert sync_service._auto_sync_task is not None
+            assert not sync_service._auto_sync_task.done()
         finally:
             await sync_service.stop_auto_sync()
             await asyncio.sleep(0)

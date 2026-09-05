@@ -841,8 +841,6 @@ async def test_shutdown_admission_rejects_new_background_and_credential_work(
     monkeypatch.setattr("backend.api.library.mark_album_downloaded", mark)
     monkeypatch.setattr("backend.api.library.unmark_album_downloaded", unmark)
     app.state.event_bus.publish = AsyncMock()
-    reload_clients = AsyncMock()
-    monkeypatch.setattr("backend.api.config._reload_clients", reload_clients)
     exchange = AsyncMock(
         return_value={
             "user_auth_token": "token",
@@ -882,7 +880,6 @@ async def test_shutdown_admission_rejects_new_background_and_credential_work(
         mark.assert_not_called()
         unmark.assert_not_called()
         app.state.event_bus.publish.assert_not_awaited()
-        reload_clients.assert_not_awaited()
         exchange.assert_not_awaited()
     finally:
         for job in app.state.scan_jobs.values():

@@ -7,36 +7,79 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from .lifecycle import require_work_admission
+from ..services.client_activation import (
+    ClientActivationShuttingDownError,
+    ClientReloadBusyError,
+    activate_config_updates,
+)
+from .lifecycle import client_operation, require_work_admission
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger("streamrip")
 
 
+class _AuthFlowError(RuntimeError):
+    def __init__(self, status_code: int, error: Exception):
+        super().__init__(str(error))
+        self.status_code = status_code
+
+
+def _activation_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, ClientReloadBusyError):
+        return HTTPException(status_code=409, detail=str(error))
+    if isinstance(error, ClientActivationShuttingDownError):
+        return HTTPException(status_code=503, detail=str(error))
+    if isinstance(error, _AuthFlowError):
+        return HTTPException(status_code=error.status_code, detail=str(error))
+    return HTTPException(status_code=502, detail=str(error))
+
+
+def _qobuz_updates(creds: dict) -> dict:
+    return {
+        "qobuz_token": creds["user_auth_token"],
+        "qobuz_user_id": str(creds["user_id"]),
+        "qobuz_app_id": creds["app_id"],
+    }
+
+
+def _tidal_updates(data: dict, auth_method: str) -> dict:
+    return {
+        "tidal_access_token": data["access_token"],
+        "tidal_refresh_token": data["refresh_token"],
+        "tidal_user_id": str(data["user_id"]),
+        "tidal_country_code": data["country_code"],
+        "tidal_token_expiry": str(data["token_expiry"]),
+        "tidal_auth_method": auth_method,
+    }
+
+
 @router.get("/status")
 async def auth_status(request: Request):
-    clients = getattr(request.app.state, "_clients_ref", {})
-    db = request.app.state.db
-    sources = []
-    for source in ("qobuz", "tidal"):
-        client = clients.get(source)
-        # Both clients are now SDK clients with an open async session while
-        # the FastAPI lifespan holds them — check _transport._session.
-        authenticated = (
-            client is not None
-            and getattr(client, "_transport", None) is not None
-            and client._transport._session is not None
-        )
-        token_key = f"{source}_token" if source == "qobuz" else f"{source}_access_token"
-        sources.append(
-            {
-                "source": source,
-                "authenticated": authenticated,
-                "user_id": db.get_config(f"{source}_user_id"),
-                "has_credentials": bool(db.get_config(token_key)),
-            }
-        )
-    return sources
+    with client_operation(request, {"qobuz", "tidal"}):
+        clients = getattr(request.app.state, "_clients_ref", {})
+        db = request.app.state.db
+        sources = []
+        for source in ("qobuz", "tidal"):
+            client = clients.get(source)
+            # Both clients are now SDK clients with an open async session while
+            # the FastAPI lifespan holds them — check _transport._session.
+            authenticated = (
+                client is not None
+                and getattr(client, "_transport", None) is not None
+                and client._transport._session is not None
+            )
+            token_key = (
+                f"{source}_token" if source == "qobuz" else f"{source}_access_token"
+            )
+            sources.append(
+                {
+                    "source": source,
+                    "authenticated": authenticated,
+                    "user_id": db.get_config(f"{source}_user_id"),
+                    "has_credentials": bool(db.get_config(token_key)),
+                }
+            )
+        return sources
 
 
 @router.get("/qobuz/oauth-url")
@@ -73,20 +116,25 @@ async def qobuz_oauth_callback_redirect(request: Request, code_autorisation: str
     if not code_autorisation:
         return RedirectResponse("/settings?oauth=error&reason=missing_code")
 
+    async def prepare():
+        try:
+            creds = await exchange_code(code_autorisation)
+        except Exception as error:
+            raise _AuthFlowError(400, error) from error
+        return _qobuz_updates(creds)
+
     try:
-        creds = await exchange_code(code_autorisation)
-    except Exception:
+        await activate_config_updates(request.app, prepare, affected_sources={"qobuz"})
+    except ClientReloadBusyError as error:
+        raise _activation_http_error(error) from error
+    except ClientActivationShuttingDownError as error:
+        raise _activation_http_error(error) from error
+    except _AuthFlowError:
         logger.exception("OAuth code exchange failed")
         return RedirectResponse("/settings?oauth=error&reason=exchange_failed")
-
-    db = request.app.state.db
-    db.set_config("qobuz_token", creds["user_auth_token"])
-    db.set_config("qobuz_user_id", str(creds["user_id"]))
-    db.set_config("qobuz_app_id", creds["app_id"])
-
-    from .config import _reload_clients
-
-    await _reload_clients(request)
+    except Exception:
+        logger.exception("OAuth credential activation failed")
+        return RedirectResponse("/settings?oauth=error&reason=activation_failed")
 
     return RedirectResponse("/settings?oauth=success")
 
@@ -101,29 +149,27 @@ async def qobuz_oauth_callback(request: Request, body: OAuthCodeRequest):
     require_work_admission(request)
     from qobuz.auth import exchange_code
 
+    profile = {}
+
+    async def prepare():
+        try:
+            creds = await exchange_code(body.code)
+        except Exception as error:
+            raise _AuthFlowError(400, error) from error
+        profile.update(creds)
+        return _qobuz_updates(creds)
+
     try:
-        creds = await exchange_code(body.code)
-    except Exception as e:
-        logger.exception("OAuth code exchange failed")
-        raise HTTPException(status_code=400, detail=str(e))
-
-    db = request.app.state.db
-    db.set_config("qobuz_token", creds["user_auth_token"])
-    db.set_config("qobuz_user_id", str(creds["user_id"]))
-    # The OAuth flow issues tokens bound to the OAuth app ("304027809").
-    # All subsequent requests MUST send X-App-Id = that app, otherwise
-    # Qobuz rejects the token with 401 on every endpoint that validates
-    # token-app binding (catalog, downloads, sync).  Persist it explicitly.
-    db.set_config("qobuz_app_id", creds["app_id"])
-
-    from .config import _reload_clients
-
-    await _reload_clients(request)
+        await activate_config_updates(request.app, prepare, affected_sources={"qobuz"})
+    except Exception as error:
+        if not isinstance(error, (ClientReloadBusyError, _AuthFlowError)):
+            logger.exception("OAuth credential activation failed")
+        raise _activation_http_error(error) from error
 
     return {
         "success": True,
-        "user_id": creds["user_id"],
-        "display_name": creds["display_name"],
+        "user_id": profile["user_id"],
+        "display_name": profile["display_name"],
     }
 
 
@@ -141,27 +187,28 @@ async def qobuz_oauth_from_url(request: Request, body: OAuthRedirectRequest):
 
     from qobuz.auth import exchange_code, extract_code_from_url
 
+    profile = {}
+
+    async def prepare():
+        try:
+            code = extract_code_from_url(body.redirect_url)
+            creds = await exchange_code(code)
+        except Exception as error:
+            raise _AuthFlowError(400, error) from error
+        profile.update(creds)
+        return _qobuz_updates(creds)
+
     try:
-        code = extract_code_from_url(body.redirect_url)
-        creds = await exchange_code(code)
-    except Exception as e:
-        logger.exception("OAuth URL exchange failed")
-        raise HTTPException(status_code=400, detail=str(e))
-
-    db = request.app.state.db
-    db.set_config("qobuz_token", creds["user_auth_token"])
-    db.set_config("qobuz_user_id", str(creds["user_id"]))
-    # See oauth-callback above — the OAuth token is bound to creds["app_id"]
-    db.set_config("qobuz_app_id", creds["app_id"])
-
-    from .config import _reload_clients
-
-    await _reload_clients(request)
+        await activate_config_updates(request.app, prepare, affected_sources={"qobuz"})
+    except Exception as error:
+        if not isinstance(error, (ClientReloadBusyError, _AuthFlowError)):
+            logger.exception("OAuth URL credential activation failed")
+        raise _activation_http_error(error) from error
 
     return {
         "success": True,
-        "user_id": creds["user_id"],
-        "display_name": creds["display_name"],
+        "user_id": profile["user_id"],
+        "display_name": profile["display_name"],
     }
 
 
@@ -214,30 +261,37 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
 
     from tidal.auth import poll_device_code
 
+    poll_result = {}
+
+    async def prepare():
+        try:
+            status, data = await poll_device_code(body.device_code)
+        except Exception as error:
+            raise _AuthFlowError(200, error) from error
+        poll_result.update({"status": status, "data": data})
+        if status != 0:
+            return None
+        return _tidal_updates(data, "device_code")
+
     try:
-        status, data = await poll_device_code(body.device_code)
-    except Exception as e:
+        activated = await activate_config_updates(
+            request.app, prepare, affected_sources={"tidal"}
+        )
+    except _AuthFlowError as error:
         logger.exception("Tidal poll request failed")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": str(error)}
+    except (ClientReloadBusyError, ClientActivationShuttingDownError) as error:
+        raise _activation_http_error(error) from error
+    except Exception as error:
+        logger.exception("Tidal credential activation failed")
+        return {"status": "error", "error": str(error)}
 
-    if status == 2:
-        return {"status": "pending"}
-    if status != 0:
+    status = poll_result["status"]
+    data = poll_result["data"]
+    if activated is None:
+        if status == 2:
+            return {"status": "pending"}
         return {"status": "error", "error": data.get("error_description") or str(data)}
-
-    # Authorized — persist credentials and hot-reload the client
-    db = request.app.state.db
-    db.set_config("tidal_access_token", data["access_token"])
-    db.set_config("tidal_refresh_token", data["refresh_token"])
-    db.set_config("tidal_user_id", str(data["user_id"]))
-    db.set_config("tidal_country_code", data["country_code"])
-    db.set_config("tidal_token_expiry", str(data["token_expiry"]))
-    db.set_config("tidal_auth_method", "device_code")
-
-    from .config import _reload_clients
-
-    await _reload_clients(request)
-
     return {"status": "authorized", "user_id": data["user_id"]}
 
 
@@ -282,36 +336,33 @@ async def tidal_pkce_complete(request: Request, body: TidalPkceCompleteRequest):
 
     from tidal.auth import exchange_pkce_code, extract_code_from_redirect
 
-    pending = _pkce_pending.pop(body.handle, None)
-    if pending is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Unknown or expired PKCE handle. Start the flow again.",
-        )
+    result = {}
+
+    async def prepare():
+        pending = _pkce_pending.pop(body.handle, None)
+        if pending is None:
+            raise _AuthFlowError(
+                400,
+                ValueError("Unknown or expired PKCE handle. Start the flow again."),
+            )
+        try:
+            code = extract_code_from_redirect(body.redirect_url)
+        except ValueError as error:
+            raise _AuthFlowError(400, error) from error
+        try:
+            data = await exchange_pkce_code(
+                code, pending["verifier"], pending["unique_key"]
+            )
+        except Exception as error:
+            raise _AuthFlowError(502, error) from error
+        result.update(data)
+        return _tidal_updates(data, "pkce")
 
     try:
-        code = extract_code_from_redirect(body.redirect_url)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        await activate_config_updates(request.app, prepare, affected_sources={"tidal"})
+    except Exception as error:
+        if not isinstance(error, (ClientReloadBusyError, _AuthFlowError)):
+            logger.exception("Tidal PKCE credential activation failed")
+        raise _activation_http_error(error) from error
 
-    try:
-        data = await exchange_pkce_code(
-            code, pending["verifier"], pending["unique_key"]
-        )
-    except Exception as e:
-        logger.exception("Tidal PKCE token exchange failed")
-        raise HTTPException(status_code=502, detail=str(e))
-
-    db = request.app.state.db
-    db.set_config("tidal_access_token", data["access_token"])
-    db.set_config("tidal_refresh_token", data["refresh_token"])
-    db.set_config("tidal_user_id", str(data["user_id"]))
-    db.set_config("tidal_country_code", data["country_code"])
-    db.set_config("tidal_token_expiry", str(data["token_expiry"]))
-    db.set_config("tidal_auth_method", "pkce")
-
-    from .config import _reload_clients
-
-    await _reload_clients(request)
-
-    return {"status": "authorized", "user_id": data["user_id"]}
+    return {"status": "authorized", "user_id": result["user_id"]}
