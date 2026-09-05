@@ -11,6 +11,10 @@ for (const key of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'HTML
   'CustomEvent', 'MutationObserver', 'getComputedStyle']) {
   globalThis[key] = dom.window[key];
 }
+Object.defineProperty(globalThis, 'navigator', {
+  configurable: true,
+  value: dom.window.navigator,
+});
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
 globalThis.cancelAnimationFrame = dom.window.cancelAnimationFrame.bind(dom.window);
 // Never let a missing mock make a real request.
