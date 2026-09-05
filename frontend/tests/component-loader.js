@@ -6,6 +6,12 @@ import { compile } from 'svelte/compiler';
 import ts from 'typescript';
 
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === '$app/state') {
+    return { url: 'data:text/javascript,export const page = { url: new URL("http://localhost/downloads") };', shortCircuit: true };
+  }
+  if (specifier === '$app/navigation') {
+    return { url: 'data:text/javascript,export async function goto() {}', shortCircuit: true };
+  }
   if (specifier === 'svelte' || specifier.startsWith('svelte/')) {
     return nextResolve(specifier, { ...context, conditions: [...context.conditions, 'browser'] });
   }
@@ -21,6 +27,7 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url.endsWith('.css')) return { format: 'module', shortCircuit: true, source: '' };
   if (url.endsWith('.svelte')) {
     const source = await readFile(new URL(url), 'utf8');
     return {

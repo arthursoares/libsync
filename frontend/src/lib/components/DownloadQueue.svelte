@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api/client';
-  import { enqueueDownloads } from '$lib/stores/downloads';
+  import { enqueueDownloads, cancelDownload } from '$lib/stores/downloads';
 
   interface TrackStatus {
     num?: number;
@@ -27,6 +26,8 @@
   }
 
   let retrying = $state<Set<string>>(new Set());
+  let cancelling = $state<Set<string>>(new Set());
+  let cancelError = $state('');
 
   let expandedItems = $state<Set<string>>(new Set());
 
@@ -40,10 +41,17 @@
   let { items = [], mode = 'active' }: { items: QueueItem[]; mode?: 'active' | 'completed' } = $props();
 
   async function cancelItem(id: string) {
+    if (cancelling.has(id)) return;
+    cancelling = new Set([...cancelling, id]);
+    cancelError = '';
     try {
-      await api.downloads.cancel(id);
+      await cancelDownload(id);
     } catch (e) {
-      console.error('Failed to cancel download', e);
+      cancelError = e instanceof Error ? e.message : 'Could not cancel download. Please try again.';
+    } finally {
+      const next = new Set(cancelling);
+      next.delete(id);
+      cancelling = next;
     }
   }
 
@@ -114,6 +122,9 @@
 </script>
 
 <div class="download-queue">
+  {#if cancelError}
+    <p role="alert" style="color: var(--destructive); font-size: var(--text-xs);">{cancelError}</p>
+  {/if}
   <div class="queue-header">
     <span class="queue-header-title">{mode === 'completed' ? 'History' : 'Queue'}</span>
     <span class="overline">{items.length} items</span>
@@ -164,7 +175,7 @@
               >{retrying.has(item.id) ? '…' : '↻'}</button>
             {/if}
           {:else}
-            <button class="btn btn-ghost btn-sm" onclick={(e) => { e.stopPropagation(); cancelItem(item.id); }} title="Cancel">✕</button>
+            <button class="btn btn-ghost btn-sm" onclick={(e) => { e.stopPropagation(); cancelItem(item.id); }} disabled={cancelling.has(item.id)} title="Cancel">✕</button>
           {/if}
         </div>
       </div>
