@@ -111,12 +111,17 @@ def _serialize_updates(updates: Mapping[str, Any]) -> dict[str, str]:
     return {key: str(value) for key, value in updates.items()}
 
 
-async def _close_clients(clients: Mapping[str, Any]) -> None:
+async def _close_clients(
+    registry: ClientOperationRegistry, clients: Mapping[str, Any]
+) -> None:
     for source, client in clients.items():
         try:
             await client.__aexit__(None, None, None)
         except Exception:
-            logger.exception("Failed to close staged %s client", source)
+            registry.retirement_failures.append((source, client))
+            logger.exception(
+                "Failed to close staged %s client; retained for shutdown", source
+            )
 
 
 async def activate_config_updates(
@@ -235,21 +240,38 @@ async def activate_config_updates(
                                 source,
                             )
 
-                    if (
+                    should_reconfigure_scheduler = bool(
                         sources
                         or {
                             "auto_sync_enabled",
                             "auto_sync_interval",
                         }
                         & serialized.keys()
-                    ):
-                        sync_service = app.state.sync_service
-                        await sync_service.stop_auto_sync()
-                        from ..main import _start_auto_sync_if_enabled
+                    )
+                    shutting_down = registry.shutting_down or getattr(
+                        app.state, "shutting_down", False
+                    )
+                    if should_reconfigure_scheduler and not shutting_down:
+                        try:
+                            sync_service = app.state.sync_service
+                            await sync_service.stop_auto_sync()
+                            shutting_down = registry.shutting_down or getattr(
+                                app.state, "shutting_down", False
+                            )
+                            if not shutting_down:
+                                from ..main import _start_auto_sync_if_enabled
 
-                        await _start_auto_sync_if_enabled(
-                            app.state.db, sync_service, shared_clients
-                        )
+                                await _start_auto_sync_if_enabled(
+                                    app.state.db, sync_service, shared_clients
+                                )
+                        except Exception:
+                            # DB commit + publication are the activation cutoff.
+                            # Maintenance after it must not make callers infer a
+                            # rollback that can no longer occur.
+                            logger.exception(
+                                "Credential activation committed, but auto-sync "
+                                "maintenance failed"
+                            )
 
                 commit_task = asyncio.create_task(commit_publish_retire())
                 registry.activation_tasks.add(commit_task)
@@ -261,10 +283,12 @@ async def activate_config_updates(
             finally:
                 registry.reloading_sources.difference_update(reserved_sources)
     finally:
-        if candidates:
-            cleanup = asyncio.create_task(_close_clients(candidates))
-            registry.activation_tasks.add(cleanup)
-            cleanup.add_done_callback(registry.activation_tasks.discard)
-            await await_task_completion(cleanup, operation="staged client cleanup")
-        if task is not None:
-            registry.activation_tasks.discard(task)
+        try:
+            if candidates:
+                cleanup = asyncio.create_task(_close_clients(registry, candidates))
+                registry.activation_tasks.add(cleanup)
+                cleanup.add_done_callback(registry.activation_tasks.discard)
+                await await_task_completion(cleanup, operation="staged client cleanup")
+        finally:
+            if task is not None:
+                registry.activation_tasks.discard(task)

@@ -68,7 +68,7 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 
 ### Credential activation
 
-Credential writes are transactional. Libsync constructs and opens a replacement client, resolves required signing credentials, and validates the account with a minimal favorites request before committing the complete config update and publishing the client. If any stage fails, the database and current client remain unchanged.
+Credential writes are transactional. Libsync constructs and opens a replacement client, resolves required signing credentials, and validates the account with a minimal favorites request before committing the complete config update and publishing the client. Failure or cancellation before that commit leaves the database and current client unchanged. Once the database commit is admitted, publication finishes as an owned transition even if shutdown starts; shutdown-time scheduler maintenance is skipped, and post-commit maintenance failures are logged without reporting a false rollback.
 
 An affected source cannot be reconfigured while its catalog request, sync, scan, queued/current download, or soft-cancelled SDK download is still active. The auth or config endpoint returns HTTP 409; retry the same action after that work finishes. Other sources remain available. OAuth codes and Tidal PKCE handles are not consumed when this busy check rejects the request.
 

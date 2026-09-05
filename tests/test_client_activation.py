@@ -10,6 +10,9 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from backend.main import (
+    _resolve_qobuz_credentials as real_resolve_qobuz_credentials,
+)
 from backend.main import create_app
 from backend.services.client_activation import (
     ClientActivationShuttingDownError,
@@ -27,11 +30,17 @@ class FakeClient:
         validation_started: asyncio.Event | None = None,
         validation_release: asyncio.Event | None = None,
         close_error: Exception | None = None,
+        close_failures: int = 0,
+        app_id: str = "candidate-app",
     ):
         self.enter_error = enter_error
         self.close_error = close_error
+        self.close_failures = close_failures
         self.enter_calls = 0
         self.close_calls = 0
+        self._transport = SimpleNamespace(app_id=app_id)
+        self.streaming = SimpleNamespace(_app_secret=None)
+        self._app_secret_cached = False
 
         async def validate(*, limit, offset):
             assert (limit, offset) == (1, 0)
@@ -53,6 +62,9 @@ class FakeClient:
 
     async def __aexit__(self, exc_type, exc, tb):
         self.close_calls += 1
+        if self.close_failures > 0:
+            self.close_failures -= 1
+            raise RuntimeError("close failed")
         if self.close_error is not None:
             raise self.close_error
 
@@ -365,3 +377,179 @@ def test_unknown_operation_source_is_conservatively_scoped_to_both(app):
     with registry.operation({"unknown"}):
         assert registry.is_busy({"qobuz"})
         assert registry.is_busy({"tidal"})
+
+
+async def test_shutdown_during_commit_finishes_transition_without_scheduler_restart(
+    app, monkeypatch
+):
+    app.state.db.set_config("auto_sync_enabled", "true")
+    candidate = FakeClient()
+    install_factory(monkeypatch, {"tidal": candidate})
+    original_commit = app.state.db.set_config_batch
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def blocked_commit(updates):
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        original_commit(updates)
+
+    monkeypatch.setattr(app.state.db, "set_config_batch", blocked_commit)
+    lifespan_ready = asyncio.Event()
+    stop_lifespan = asyncio.Event()
+    shutdown_started = asyncio.Event()
+    original_begin_shutdown = app.state.client_operations.begin_shutdown
+
+    def record_shutdown_start():
+        original_begin_shutdown()
+        shutdown_started.set()
+
+    monkeypatch.setattr(
+        app.state.client_operations, "begin_shutdown", record_shutdown_start
+    )
+
+    async def serve_lifespan():
+        async with app.router.lifespan_context(app):
+            lifespan_ready.set()
+            await stop_lifespan.wait()
+
+    lifespan_task = asyncio.create_task(serve_lifespan())
+    await lifespan_ready.wait()
+    scheduler_restart = AsyncMock()
+    monkeypatch.setattr("backend.main._start_auto_sync_if_enabled", scheduler_restart)
+
+    activation_task = asyncio.create_task(
+        activate_config_updates(app, {"tidal_access_token": "new"})
+    )
+    assert await asyncio.to_thread(write_started.wait, 2)
+    stop_lifespan.set()
+    await shutdown_started.wait()
+
+    assert candidate.close_calls == 0
+    release_write.set()
+    await activation_task
+    await lifespan_task
+
+    assert app.state.db.get_config("tidal_access_token") == "new"
+    assert app.state._clients_ref["tidal"] is candidate
+    assert candidate.close_calls == 1
+    scheduler_restart.assert_not_awaited()
+
+
+async def test_postcommit_scheduler_failure_does_not_report_activation_rollback(
+    app, monkeypatch, caplog
+):
+    app.state.db.set_config("auto_sync_enabled", "true")
+    candidate = FakeClient()
+    install_factory(monkeypatch, {"tidal": candidate})
+    monkeypatch.setattr(
+        "backend.main._start_auto_sync_if_enabled",
+        AsyncMock(side_effect=RuntimeError("scheduler failed")),
+    )
+
+    await activate_config_updates(app, {"tidal_access_token": "new"})
+
+    assert app.state.db.get_config("tidal_access_token") == "new"
+    assert app.state._clients_ref["tidal"] is candidate
+    assert (
+        "Credential activation committed, but auto-sync maintenance failed"
+        in caplog.text
+    )
+
+
+async def test_cancelled_request_is_removed_from_activation_registry(app, monkeypatch):
+    validation_started = asyncio.Event()
+    validation_release = asyncio.Event()
+    candidate = FakeClient(
+        validation_started=validation_started,
+        validation_release=validation_release,
+    )
+    install_factory(monkeypatch, {"qobuz": candidate})
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        request_task = asyncio.create_task(
+            client.patch("/api/config", json={"qobuz_token": "new"})
+        )
+        await validation_started.wait()
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    await asyncio.sleep(0)
+    assert candidate.close_calls == 1
+    assert request_task not in app.state.client_operations.activation_tasks
+
+
+async def test_failed_candidate_close_is_retained_and_retried_at_shutdown(
+    app, monkeypatch
+):
+    old = FakeClient()
+    candidate = FakeClient(
+        validation_error=RuntimeError("invalid credentials"), close_failures=1
+    )
+    app.state.db.set_config("qobuz_token", "old")
+    app.state._clients_ref["qobuz"] = old
+    install_factory(monkeypatch, {"qobuz": candidate})
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch("/api/config", json={"qobuz_token": "new"})
+        assert response.status_code == 400
+        assert app.state.db.get_config("qobuz_token") == "old"
+        assert app.state._clients_ref["qobuz"] is old
+        assert candidate.close_calls == 1
+        assert app.state.client_operations.retirement_failures == [("qobuz", candidate)]
+
+    assert old.close_calls == 1
+    assert candidate.close_calls == 2
+
+
+async def test_scan_setup_failure_releases_claim_before_real_activation(
+    app, monkeypatch
+):
+    original_get_config = app.state.db.get_config
+
+    def fail_config_read(key):
+        raise RuntimeError("config read failed")
+
+    monkeypatch.setattr(app.state.db, "get_config", fail_config_read)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        with pytest.raises(RuntimeError, match="config read failed"):
+            await client.post("/api/library/scan-fuzzy")
+
+        monkeypatch.setattr(app.state.db, "get_config", original_get_config)
+        assert not app.state.client_operations.is_busy({"qobuz", "tidal"})
+        assert app.state.scan_tasks == set()
+        assert app.state.scan_jobs == {}
+        assert app.state.active_scan_job is None
+
+        candidate = FakeClient()
+        install_factory(monkeypatch, {"qobuz": candidate})
+        response = await client.patch("/api/config", json={"qobuz_token": "new"})
+        assert response.status_code == 200
+
+
+async def test_missing_qobuz_app_id_persists_validated_transport_id(app, monkeypatch):
+    candidate = FakeClient(app_id="validated-transport-app")
+    install_factory(monkeypatch, {"qobuz": candidate})
+    monkeypatch.setattr(
+        "backend.main._resolve_qobuz_credentials", real_resolve_qobuz_credentials
+    )
+    monkeypatch.setattr(
+        "qobuz.spoofer.fetch_app_credentials",
+        AsyncMock(return_value=("different-bundle-app", ["secret"])),
+    )
+    verify_secret = AsyncMock(return_value="secret")
+    monkeypatch.setattr("qobuz.spoofer.find_working_secret", verify_secret)
+
+    await activate_config_updates(app, {"qobuz_token": "new"})
+
+    assert app.state.db.get_config("qobuz_app_id") == "validated-transport-app"
+    assert candidate._transport.app_id == "validated-transport-app"
+    verify_secret.assert_awaited_once_with("validated-transport-app", ["secret"], "new")

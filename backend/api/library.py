@@ -249,7 +249,6 @@ async def start_scan(request: Request):
             {"error": "Another scan is already running"}, status_code=409
         )
 
-    operation_claim = claim_client_operation(request, {"qobuz", "tidal"})
     db = app.state.db
     download_path = resolve_downloads_root(db)
     sentinel_enabled = _parse_bool(
@@ -259,12 +258,6 @@ async def start_scan(request: Request):
     _prune_scan_jobs(app.state.scan_jobs, active_job_id=app.state.active_scan_job)
 
     job_id = uuid.uuid4().hex
-    app.state.scan_jobs[job_id] = {
-        "status": "running",
-        "progress": {"scanned": 0, "total": 0},
-        "result": None,
-    }
-    app.state.active_scan_job = job_id
 
     # Wrap the event bus so scan_progress events also update the in-memory
     # job registry — the polling GET endpoint reads that so the UI can show
@@ -315,16 +308,30 @@ async def start_scan(request: Request):
             if app.state.active_scan_job == job_id:
                 app.state.active_scan_job = None
 
+    operation_claim = claim_client_operation(request, {"qobuz", "tidal"})
+    task = None
     try:
+        app.state.scan_jobs[job_id] = {
+            "status": "running",
+            "progress": {"scanned": 0, "total": 0},
+            "result": None,
+        }
+        app.state.active_scan_job = job_id
         task = asyncio.create_task(runner())
+        app.state.scan_tasks.add(task)
+        task.add_done_callback(app.state.scan_tasks.discard)
+        task.add_done_callback(
+            lambda _task: app.state.client_operations.release(operation_claim)
+        )
     except BaseException:
+        if task is not None:
+            task.cancel()
+            app.state.scan_tasks.discard(task)
+        app.state.scan_jobs.pop(job_id, None)
+        if app.state.active_scan_job == job_id:
+            app.state.active_scan_job = None
         app.state.client_operations.release(operation_claim)
         raise
-    app.state.scan_tasks.add(task)
-    task.add_done_callback(app.state.scan_tasks.discard)
-    task.add_done_callback(
-        lambda _task: app.state.client_operations.release(operation_claim)
-    )
     return {"job_id": job_id}
 
 

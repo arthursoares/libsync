@@ -236,7 +236,7 @@ async def _resolve_qobuz_credentials(
     try:
         from qobuz.spoofer import fetch_app_credentials, find_working_secret
 
-        bundle_app_id, secrets = await fetch_app_credentials()
+        _bundle_app_id, secrets = await fetch_app_credentials()
         token = _config_value(config, "qobuz_token")
         if not token or not secrets:
             if strict:
@@ -245,10 +245,11 @@ async def _resolve_qobuz_credentials(
 
         derived = {}
         if not _config_value(config, "qobuz_app_id"):
-            derived["qobuz_app_id"] = bundle_app_id
-            logger.info("Cached Qobuz app_id from bundle: %s", bundle_app_id)
-
-        client_app_id = qobuz._transport.app_id
+            # The candidate was built with this app ID and signing verification
+            # below uses it. Persisting the bundle ID instead could make the DB
+            # disagree with the successfully validated live transport.
+            derived["qobuz_app_id"] = str(client_app_id)
+            logger.info("Prepared Qobuz app_id from candidate: %s", client_app_id)
 
         secret = None
         try:
