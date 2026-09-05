@@ -350,6 +350,7 @@ def mark_album_downloaded(
     track_ids: tuple[str, ...],
     sentinel_write_enabled: bool = True,
     now: datetime | None = None,
+    downloaded_at: str | None = None,
 ) -> None:
     """Mark an album complete in DB, dedup DB, and optionally on disk.
 
@@ -362,7 +363,7 @@ def mark_album_downloaded(
     album_hint = db.get_album(album_id)
     if album_hint is None:
         raise AlbumNotFoundError(f"Album {album_id} not found")
-    downloaded_at = (now or datetime.now()).isoformat()
+    downloaded_at = downloaded_at or (now or datetime.now()).isoformat()
     album = db.apply_album_download_state(
         album_id,
         True,

@@ -3,6 +3,8 @@
 from fastapi import APIRouter, Request
 
 from ..models.schemas import DownloadRequest
+from ..services.paths import resolve_database_dir, resolve_downloads_root
+from ..services.sentinels import reconcile_sentinels
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
@@ -70,43 +72,14 @@ async def remove_from_queue(request: Request, item_id: str):
 @router.post("/scan")
 async def scan_downloads(request: Request):
     """Scan the download directory for .streamrip.json files and reconcile with DB."""
-    from datetime import datetime
-
-    from qobuz.downloader import AlbumDownloader
-
     db = request.app.state.db
-    download_path = db.get_config("downloads_path") or "/music"
-
-    albums = AlbumDownloader.scan_downloaded_albums(download_path)
-    reconciled = 0
-
-    for meta in albums:
-        source = meta.get("source", "qobuz")
-        album_id = meta.get("album_id")
-        if not album_id:
-            continue
-
-        existing = db.get_album_by_source_id(source, album_id)
-        if existing is None:
-            db.upsert_album(
-                source=source,
-                source_album_id=album_id,
-                title=meta.get("title", "Unknown"),
-                artist=meta.get("artist", "Unknown"),
-                track_count=meta.get("tracks_count"),
-                added_to_library_at=meta.get(
-                    "downloaded_at", datetime.now().isoformat()
-                ),
-            )
-
-        db.update_album_status(
-            db.get_album_by_source_id(source, album_id)["id"],
-            "complete",
-            downloaded_at=meta.get("downloaded_at"),
-        )
-        reconciled += 1
-
-    return {"scanned": len(albums), "reconciled": reconciled}
+    return await reconcile_sentinels(
+        db,
+        request.app.state._clients_ref,
+        request.app.state.event_bus,
+        download_root=resolve_downloads_root(db),
+        dedup_db_dir=resolve_database_dir(db),
+    )
 
 
 @router.post("/cancel")
