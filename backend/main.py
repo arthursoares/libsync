@@ -14,6 +14,7 @@ from .services.download import DownloadService
 from .services.event_bus import EventBus
 from .services.library import LibraryService
 from .services.sync import SyncService
+from .services.tasks import await_task_completion
 
 logger = logging.getLogger("streamrip")
 
@@ -302,6 +303,41 @@ def create_app(db_path: str | None = None) -> FastAPI:
         download_service=download_service,
     )
 
+    async def drain_app(app: FastAPI) -> None:
+        # A broken cleanup stage must not leak unrelated owned tasks or
+        # current client sessions, nor replace an exception from `yield`.
+        for name, shutdown in (
+            ("sync service", sync_service.shutdown),
+            ("download service", download_service.shutdown),
+        ):
+            try:
+                await shutdown()
+            except asyncio.CancelledError:
+                logger.exception("%s drainage was unexpectedly cancelled", name)
+            except Exception:
+                logger.exception("Failed to drain %s", name)
+
+        scan_tasks = tuple(app.state.scan_tasks)
+        if scan_tasks:
+            logger.info("Shutdown waiting for %d scan task(s)", len(scan_tasks))
+            results = await asyncio.gather(*scan_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Scan task failed during shutdown",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+
+        # Use the live reference because credential hot-reload swaps the map.
+        for name, client in tuple(app.state._clients_ref.items()):
+            try:
+                await client.__aexit__(None, None, None)
+            except asyncio.CancelledError:
+                logger.exception("Closing %s client was unexpectedly cancelled", name)
+            except Exception:
+                logger.exception("Failed to close %s client", name)
+        logger.info("streamrip web UI shutting down")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.shutting_down = False
@@ -324,41 +360,18 @@ def create_app(db_path: str | None = None) -> FastAPI:
             await _start_auto_sync_if_enabled(db, sync_service, clients)
             yield
         finally:
-            # Flip admission synchronously before any shutdown await.
+            # Flip admission and producer flags synchronously before any await.
             app.state.shutting_down = True
             app.state.scan_stop_event.set()
-            for name, begin_shutdown in (
-                ("sync service", sync_service.begin_shutdown),
-                ("download service", download_service.begin_shutdown),
-            ):
-                try:
-                    begin_shutdown()
-                except Exception:
-                    logger.exception("Failed to signal %s shutdown", name)
+            sync_service.begin_shutdown()
+            download_service.begin_shutdown()
 
-            # A broken cleanup stage must not leak unrelated owned tasks or
-            # current client sessions, nor replace an exception from `yield`.
-            for name, shutdown in (
-                ("sync service", sync_service.shutdown),
-                ("download service", download_service.shutdown),
-            ):
-                try:
-                    await shutdown()
-                except Exception:
-                    logger.exception("Failed to drain %s", name)
-
-            scan_tasks = tuple(app.state.scan_tasks)
-            if scan_tasks:
-                logger.info("Shutdown waiting for %d scan task(s)", len(scan_tasks))
-                await asyncio.gather(*scan_tasks, return_exceptions=True)
-
-            # Use the live reference because credential hot-reload swaps the map.
-            for name, client in tuple(app.state._clients_ref.items()):
-                try:
-                    await client.__aexit__(None, None, None)
-                except Exception:
-                    logger.exception("Failed to close %s client", name)
-            logger.info("streamrip web UI shutting down")
+            if app.state.shutdown_task is None:
+                app.state.shutdown_task = asyncio.create_task(drain_app(app))
+            await await_task_completion(
+                app.state.shutdown_task,
+                operation="application shutdown",
+            )
 
     app = FastAPI(title="streamrip", version="3.0.0", lifespan=lifespan)
     app.state.db = db
@@ -372,6 +385,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.scan_tasks = set()
     app.state.scan_stop_event = asyncio.Event()
     app.state.active_scan_job = None  # one-at-a-time guard
+    app.state.shutdown_task = None
 
     @app.get("/api/health")
     async def health():

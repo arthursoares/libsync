@@ -110,6 +110,7 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 - The current album is allowed to drain because the SDK has no downloader-wide cancellation cleanup; queued albums are cancelled without starting
 - Fuzzy scans stop between folders and wait for any already-dispatched database mutation to finish
 - SDK clients close only after owned download, sync, scan, and progress-event tasks finish
+- Repeated cancellation of the shutdown caller is deferred until that complete drainage and client cleanup operation finishes
 - Libsync does not impose an internal drain timeout. The process supervisor controls hard-termination timing if an SDK operation cannot finish.
 
 ### Settings

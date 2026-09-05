@@ -20,6 +20,7 @@ from pathlib import Path
 import mutagen
 
 from ..models.database import AlbumNotFoundError
+from .tasks import run_thread_write
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
@@ -461,19 +462,6 @@ def _inspect_folder(folder: Path) -> tuple[bool, FolderMeta | None]:
     return False, read_folder_metadata(folder)
 
 
-async def _await_thread_mutation(function, /, *args, **kwargs):
-    """Wait for an already-started thread write before propagating cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await task
-        except Exception:
-            logger.exception("scan: thread mutation failed during cancellation")
-        raise
-
-
 async def run_scan(
     db,
     *,
@@ -580,7 +568,7 @@ async def run_scan(
                         "scan_progress", {"scanned": i, "total": total}
                     )
                     continue
-                await _await_thread_mutation(
+                await run_thread_write(
                     mark_album_downloaded,
                     db,
                     album_id,
@@ -588,6 +576,7 @@ async def run_scan(
                     dedup_db_dir=dedup_db_dir,
                     track_ids=track_ids,
                     sentinel_write_enabled=sentinel_write_enabled,
+                    operation="scan album download-state write",
                 )
             except Exception as e:
                 logger.exception(

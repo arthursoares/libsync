@@ -10,6 +10,7 @@ from typing import Any
 from ..models.database import AppDatabase
 from .event_bus import EventBus
 from .paths import resolve_database_dir
+from .tasks import await_task_completion
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
@@ -110,6 +111,7 @@ class DownloadService:
         self._cancel_requested: set[str] = set()
         self._worker_task: asyncio.Task | None = None
         self._progress_tasks: set[asyncio.Task] = set()
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._stopping = False
 
     @property
@@ -336,25 +338,40 @@ class DownloadService:
         ]
         await self.cancel(ids)
 
-    def _settle_pending_for_shutdown(self) -> None:
+    def _settle_pending_for_shutdown(self) -> list[tuple[str, BaseException]]:
+        errors: list[tuple[str, BaseException]] = []
         for item in self._queue:
             if item["status"] != "pending":
                 continue
             item["status"] = "cancelled"
-            self.db.update_album_status(item["album_db_id"], "not_downloaded")
+            try:
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
+            except Exception as error:
+                errors.append(
+                    (f"pending album {item['source_album_id']} status", error)
+                )
+        return errors
 
     def begin_shutdown(self) -> None:
         """Synchronously close admission before the shutdown coroutine yields."""
         self._stopping = True
-        self._settle_pending_for_shutdown()
 
-    async def shutdown(self) -> None:
-        """Stop admission and queue advancement, then drain owned tasks."""
-        self.begin_shutdown()
+    @staticmethod
+    def _log_shutdown_error(operation: str, error: BaseException) -> None:
+        logger.error(
+            "Download shutdown could not finish %s",
+            operation,
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
+    async def _drain_shutdown(self) -> None:
+        errors: list[tuple[str, BaseException]] = []
+        try:
+            errors.extend(self._settle_pending_for_shutdown())
+        except Exception as error:
+            errors.append(("pending queue settlement", error))
         worker = self._worker_task
-        current = asyncio.current_task()
-        if worker is not None and worker is not current and not worker.done():
+        if worker is not None and not worker.done():
             active = next(
                 (item for item in self._queue if item["status"] == "downloading"),
                 None,
@@ -364,12 +381,14 @@ class DownloadService:
                     "Shutdown waiting for current album download to finish: %s",
                     active["title"],
                 )
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                await worker
-                raise
-        if worker is not None and worker.done():
+        if worker is not None:
+            results = await asyncio.gather(worker, return_exceptions=True)
+            errors.extend(
+                ("download worker", result)
+                for result in results
+                if isinstance(result, BaseException)
+            )
+        if worker is not None and worker.done() and self._worker_task is worker:
             self._worker_task = None
 
         while self._progress_tasks:
@@ -377,13 +396,31 @@ class DownloadService:
             logger.info(
                 "Shutdown waiting for %d download progress event task(s)", len(tasks)
             )
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            self._progress_tasks.difference_update(tasks)
+            errors.extend(
+                ("download progress event", result)
+                for result in results
+                if isinstance(result, BaseException)
+            )
+
+        for operation, error in errors:
+            self._log_shutdown_error(operation, error)
+
+    async def shutdown(self) -> None:
+        """Stop admission and drain every owned task despite caller cancellation."""
+        self.begin_shutdown()
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._drain_shutdown())
+        await await_task_completion(
+            self._shutdown_task,
+            operation="download service shutdown",
+        )
 
     async def _process_queue(self):
         try:
             while True:
                 if self._stopping:
-                    self._settle_pending_for_shutdown()
                     break
                 pending = [item for item in self._queue if item["status"] == "pending"]
                 if not pending:

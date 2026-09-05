@@ -5,6 +5,7 @@ import logging
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .tasks import await_task_completion
 
 logger = logging.getLogger("streamrip")
 
@@ -29,6 +30,7 @@ class SyncService:
         self.download_service = download_service
         self._auto_sync_task: asyncio.Task | None = None
         self._sync_tasks: set[asyncio.Task] = set()
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._stopping = False
 
     async def get_diff(self, source: str) -> dict:
@@ -202,23 +204,40 @@ class SyncService:
                 except Exception:
                     logger.exception("Auto-sync failed for %s", source)
 
-        self._auto_sync_task = asyncio.create_task(_auto_sync_loop())
+        task = asyncio.create_task(_auto_sync_loop())
+        self._auto_sync_task = task
+
+        def clear_finished(done: asyncio.Task) -> None:
+            if self._auto_sync_task is done:
+                self._auto_sync_task = None
+
+        task.add_done_callback(clear_finished)
 
     async def stop_auto_sync(self) -> None:
         task = self._auto_sync_task
-        self._auto_sync_task = None
-        if task is None or task.done() or task is asyncio.current_task():
+        if task is None or task is asyncio.current_task():
             return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+        try:
+            await await_task_completion(
+                task,
+                operation="auto-sync scheduler stop",
+                suppress_inner_cancellation=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Auto-sync scheduler failed while stopping")
+        finally:
+            if task.done() and self._auto_sync_task is task:
+                self._auto_sync_task = None
 
     def begin_shutdown(self) -> None:
         """Synchronously close manual and scheduled sync admission."""
         self._stopping = True
 
-    async def shutdown(self) -> None:
-        """Stop scheduled work, cancel active syncs, and await ownership."""
-        self.begin_shutdown()
+    async def _drain_shutdown(self) -> None:
         await self.stop_auto_sync()
 
         current = asyncio.current_task()
@@ -230,3 +249,13 @@ class SyncService:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        """Stop scheduled work and retain drainage through caller cancellation."""
+        self.begin_shutdown()
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._drain_shutdown())
+        await await_task_completion(
+            self._shutdown_task,
+            operation="sync service shutdown",
+        )

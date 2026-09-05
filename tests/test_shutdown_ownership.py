@@ -13,6 +13,7 @@ from backend.main import create_app
 from backend.models.database import AppDatabase
 from backend.services.download import DownloadService
 from backend.services.event_bus import EventBus
+from backend.services.library import LibraryService
 from backend.services.scan import FolderMeta, run_scan
 from backend.services.sync import SyncService
 
@@ -198,6 +199,131 @@ async def test_download_shutdown_awaits_callback_progress_publish(tmp_path):
                 await task
 
 
+async def test_repeated_lifespan_cancellation_waits_for_all_owned_cleanup(
+    tmp_path, monkeypatch
+):
+    app = create_app(db_path=str(tmp_path / "libsync.db"))
+    service = app.state.download_service
+    app.state.db.upsert_album("qobuz", "blocked", "Blocked", "Artist")
+    album_started = asyncio.Event()
+    album_finished = asyncio.Event()
+    album_hard_cancelled = asyncio.Event()
+    release_album = asyncio.Event()
+    progress_started = asyncio.Event()
+    progress_finished = asyncio.Event()
+    release_progress = asyncio.Event()
+    scan_started = asyncio.Event()
+    scan_finished = asyncio.Event()
+    release_scan = asyncio.Event()
+
+    async def block_callback_progress(data):
+        if not data.get("current_track"):
+            return
+        progress_started.set()
+        await release_progress.wait()
+        progress_finished.set()
+
+    app.state.event_bus.subscribe("download_progress", block_callback_progress)
+
+    async def close_client(*_args):
+        assert album_finished.is_set()
+        assert progress_finished.is_set()
+        assert scan_finished.is_set()
+
+    client = _catalog_client(close=close_client)
+    service.clients = {"qobuz": client}
+    app.state.library_service.clients = service.clients
+    app.state.sync_service.clients = service.clients
+    app.state._clients_ref = service.clients
+
+    class BlockingDownloader:
+        def __init__(self, *_args, on_track_start, **_kwargs):
+            self.on_track_start = on_track_start
+
+        async def download(self, _source_album_id):
+            self.on_track_start(1, "Track")
+            album_started.set()
+            try:
+                await release_album.wait()
+            except asyncio.CancelledError:
+                album_hard_cancelled.set()
+                raise
+            album_finished.set()
+            return SimpleNamespace(
+                total=1,
+                successful=1,
+                success_rate=1.0,
+                title="Blocked",
+                artist="Artist",
+                tracks=[],
+            )
+
+    async def blocked_scan():
+        scan_started.set()
+        await release_scan.wait()
+        scan_finished.set()
+
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    scan_task = asyncio.create_task(blocked_scan())
+    app.state.scan_tasks.add(scan_task)
+    scan_task.add_done_callback(app.state.scan_tasks.discard)
+    shutdown_task = None
+    try:
+        with patch("qobuz.AlbumDownloader", new=BlockingDownloader):
+            await service.enqueue("qobuz", ["blocked"])
+            await album_started.wait()
+            await progress_started.wait()
+            await scan_started.wait()
+
+            shutdown_task = asyncio.create_task(context.__aexit__(None, None, None))
+            while not service.stopping:
+                await _next_loop_turn()
+
+            shutdown_task.cancel()
+            await _next_loop_turn()
+            shutdown_task.cancel()
+            await _next_loop_turn()
+            assert not shutdown_task.done()
+            assert not album_hard_cancelled.is_set()
+            client.__aexit__.assert_not_awaited()
+
+            release_album.set()
+            await album_finished.wait()
+            assert not shutdown_task.done()
+            client.__aexit__.assert_not_awaited()
+
+            release_progress.set()
+            await progress_finished.wait()
+            await _next_loop_turn()
+            assert not shutdown_task.done()
+            client.__aexit__.assert_not_awaited()
+
+            # A further caller cancellation during scan drainage is also delayed.
+            shutdown_task.cancel()
+            await _next_loop_turn()
+            assert not shutdown_task.done()
+            release_scan.set()
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown_task
+    finally:
+        release_album.set()
+        release_progress.set()
+        release_scan.set()
+        await asyncio.gather(scan_task, return_exceptions=True)
+        if shutdown_task is not None and not shutdown_task.done():
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+        elif shutdown_task is None:
+            with suppress(Exception):
+                await context.__aexit__(None, None, None)
+
+    assert not album_hard_cancelled.is_set()
+    assert service._worker_task is None
+    assert service._progress_tasks == set()
+    assert app.state.scan_tasks == set()
+    client.__aexit__.assert_awaited_once_with(None, None, None)
+
+
 @pytest.mark.parametrize("owner", ["manual", "auto"])
 async def test_sync_shutdown_interrupts_and_awaits_active_runs(tmp_path, owner):
     db = AppDatabase(str(tmp_path / "libsync.db"))
@@ -240,6 +366,65 @@ async def test_sync_shutdown_interrupts_and_awaits_active_runs(tmp_path, owner):
         if auto_task is not None and not auto_task.done():
             auto_task.cancel()
             await asyncio.gather(auto_task, return_exceptions=True)
+
+
+async def test_sync_shutdown_waits_for_real_library_batch_write(tmp_path, monkeypatch):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    library = LibraryService(db, EventBus(), clients={"qobuz": object()})
+    library.fetch_all_favorites = AsyncMock(
+        return_value=[
+            {
+                "id": "written-during-shutdown",
+                "title": "Album",
+                "artist": {"name": "Artist"},
+                "tracks_count": 1,
+            }
+        ]
+    )
+    write_started = threading.Event()
+    write_finished = threading.Event()
+    release_write = threading.Event()
+    original_upsert = db.upsert_albums
+
+    def blocking_upsert(rows):
+        write_started.set()
+        release_write.wait()
+        original_upsert(rows)
+        write_finished.set()
+
+    monkeypatch.setattr(db, "upsert_albums", blocking_upsert)
+    service = SyncService(
+        db,
+        EventBus(),
+        clients=library.clients,
+        library_service=library,
+    )
+    await service.start_auto_sync("qobuz", 0)
+    scheduler = service._auto_sync_task
+    shutdown = None
+    try:
+        await asyncio.to_thread(write_started.wait)
+        shutdown = asyncio.create_task(service.shutdown())
+        await _next_loop_turn()
+
+        assert not shutdown.done()
+        assert service._auto_sync_task is scheduler
+        assert not write_finished.is_set()
+
+        release_write.set()
+        await shutdown
+    finally:
+        release_write.set()
+        if shutdown is not None and not shutdown.done():
+            await asyncio.gather(shutdown, return_exceptions=True)
+        if not write_finished.is_set():
+            await asyncio.to_thread(write_finished.wait)
+
+    assert service._auto_sync_task is None
+    assert service._sync_tasks == set()
+    assert scheduler is not None and scheduler.cancelled()
+    assert db.get_album_by_source_id("qobuz", "written-during-shutdown") is not None
+    assert db.get_sync_history("qobuz")[0]["status"] == "interrupted"
 
 
 @pytest.mark.parametrize("phase", ["sync_started", "sync_complete"])
@@ -294,6 +479,73 @@ def test_startup_interrupts_only_stale_running_syncs(tmp_path):
     assert history[stale_id]["completed_at"] is not None
     assert history[complete_id]["status"] == "complete"
     assert history[failed_id]["status"] == "failed"
+
+
+async def test_cancelled_scan_waits_for_real_resolver_cache_write(
+    tmp_path, monkeypatch
+):
+    import backend.services.scan as scan_module
+
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    album_id = db.upsert_album("qobuz", "cache", "Album", "Artist", track_count=1)
+    folder = tmp_path / "Artist - Album"
+    folder.mkdir()
+    meta = FolderMeta(folder, "Artist", "Album", None, None, 1, "tags")
+    client = _catalog_client()
+    write_started = threading.Event()
+    write_finished = threading.Event()
+    release_write = threading.Event()
+    original_cache = db.cache_album_tracks
+
+    def blocking_cache(*args, **kwargs):
+        write_started.set()
+        release_write.wait()
+        original_cache(*args, **kwargs)
+        write_finished.set()
+
+    monkeypatch.setattr(db, "cache_album_tracks", blocking_cache)
+    monkeypatch.setattr(
+        scan_module, "_find_album_folders", lambda _root: ([folder], [])
+    )
+    monkeypatch.setattr(scan_module, "_inspect_folder", lambda _folder: (False, meta))
+    monkeypatch.setattr(
+        scan_module,
+        "classify",
+        lambda *_args: SimpleNamespace(
+            kind="auto_match", album_id=album_id, reason="exact"
+        ),
+    )
+
+    task = asyncio.create_task(
+        run_scan(
+            db,
+            clients={"qobuz": client},
+            download_path=str(tmp_path),
+            dedup_db_dir=str(tmp_path),
+            event_bus=EventBus(),
+        )
+    )
+    try:
+        await asyncio.to_thread(write_started.wait)
+        task.cancel()
+        await _next_loop_turn()
+        assert not task.done()
+        assert not write_finished.is_set()
+
+        release_write.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_write.set()
+        if not write_finished.is_set():
+            await asyncio.to_thread(write_finished.wait)
+        if not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert write_finished.is_set()
+    assert [track["source_track_id"] for track in db.get_tracks(album_id)] == [
+        "track-1"
+    ]
 
 
 async def test_cancelling_scan_waits_for_running_thread_mutation(tmp_path, monkeypatch):
@@ -416,15 +668,134 @@ async def test_lifespan_body_and_cleanup_errors_do_not_skip_remaining_cleanup(tm
     assert app.state.shutting_down is True
 
 
+async def test_pending_status_failures_do_not_skip_download_drain_or_client_close(
+    tmp_path, monkeypatch, caplog
+):
+    app = create_app(db_path=str(tmp_path / "libsync.db"))
+    service = app.state.download_service
+    active_id = app.state.db.upsert_album("qobuz", "active", "Active", "Artist")
+    queued_ids = [
+        app.state.db.upsert_album("qobuz", source_id, title, "Artist")
+        for source_id, title in (("queued-1", "Queued 1"), ("queued-2", "Queued 2"))
+    ]
+    album_started = asyncio.Event()
+    album_finished = asyncio.Event()
+    release_album = asyncio.Event()
+    progress_started = asyncio.Event()
+    progress_finished = asyncio.Event()
+    release_progress = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def block_callback_progress(data):
+        if not data.get("current_track"):
+            return
+        progress_started.set()
+        await release_progress.wait()
+        progress_finished.set()
+
+    app.state.event_bus.subscribe("download_progress", block_callback_progress)
+    client = _catalog_client()
+    service.clients = {"qobuz": client}
+    app.state.library_service.clients = service.clients
+    app.state.sync_service.clients = service.clients
+    app.state._clients_ref = service.clients
+
+    class BlockingDownloader:
+        def __init__(self, *_args, on_track_start, **_kwargs):
+            self.on_track_start = on_track_start
+
+        async def download(self, source_album_id):
+            if source_album_id != "active":
+                second_started.set()
+            self.on_track_start(1, "Track")
+            album_started.set()
+            await release_album.wait()
+            album_finished.set()
+            return SimpleNamespace(
+                total=1,
+                successful=1,
+                success_rate=1.0,
+                title="Active",
+                artist="Artist",
+                tracks=[],
+            )
+
+    context = app.router.lifespan_context(app)
+    await context.__aenter__()
+    shutdown = None
+    original_update = app.state.db.update_album_status
+
+    def failing_pending_update(album_id, status, *args, **kwargs):
+        if album_id in queued_ids and status == "not_downloaded":
+            raise RuntimeError(f"status persistence failed for {album_id}")
+        return original_update(album_id, status, *args, **kwargs)
+
+    try:
+        with patch("qobuz.AlbumDownloader", new=BlockingDownloader):
+            await service.enqueue("qobuz", ["active", "queued-1", "queued-2"])
+            await album_started.wait()
+            await progress_started.wait()
+            monkeypatch.setattr(
+                app.state.db, "update_album_status", failing_pending_update
+            )
+
+            shutdown = asyncio.create_task(context.__aexit__(None, None, None))
+            while not service.stopping:
+                await _next_loop_turn()
+            await _next_loop_turn()
+            assert not shutdown.done()
+            client.__aexit__.assert_not_awaited()
+            assert not second_started.is_set()
+
+            release_album.set()
+            await album_finished.wait()
+            assert not shutdown.done()
+            client.__aexit__.assert_not_awaited()
+
+            release_progress.set()
+            await shutdown
+    finally:
+        release_album.set()
+        release_progress.set()
+        if shutdown is not None and not shutdown.done():
+            await asyncio.gather(shutdown, return_exceptions=True)
+        elif shutdown is None:
+            with suppress(Exception):
+                await context.__aexit__(None, None, None)
+
+    queue = {item["source_album_id"]: item for item in service.get_queue()}
+    assert queue["active"]["status"] == "complete"
+    assert queue["queued-1"]["status"] == "cancelled"
+    assert queue["queued-2"]["status"] == "cancelled"
+    assert app.state.db.get_album(active_id)["download_status"] == "complete"
+    assert service._worker_task is None
+    assert service._progress_tasks == set()
+    assert progress_finished.is_set()
+    assert not second_started.is_set()
+    client.__aexit__.assert_awaited_once_with(None, None, None)
+    assert "status persistence failed" in caplog.text
+
+
 async def test_shutdown_admission_rejects_new_background_and_credential_work(
     tmp_path, monkeypatch
 ):
     app = create_app(db_path=str(tmp_path / "libsync.db"))
+    album_id = app.state.db.upsert_album("qobuz", "guarded", "Guarded", "Artist")
     app.state.shutting_down = True
     app.state.download_service.enqueue = AsyncMock()
     app.state.sync_service.run_sync = AsyncMock()
+    app.state.library_service.refresh_library = AsyncMock(
+        return_value={"total": 0, "new": 0, "new_album_ids": []}
+    )
     scan = AsyncMock(return_value={"status": "complete"})
     monkeypatch.setattr("backend.services.scan.run_scan", scan)
+    resolve_tracks = AsyncMock(return_value=("track-1",))
+    monkeypatch.setattr("backend.api.library.resolve_album_track_ids", resolve_tracks)
+    mark = MagicMock()
+    unmark = MagicMock()
+    monkeypatch.setattr("backend.api.library.mark_album_downloaded", mark)
+    monkeypatch.setattr("backend.api.library.unmark_album_downloaded", unmark)
+    app.state.event_bus.publish = AsyncMock()
     reload_clients = AsyncMock()
     monkeypatch.setattr("backend.api.config._reload_clients", reload_clients)
     exchange = AsyncMock(
@@ -447,15 +818,25 @@ async def test_shutdown_admission_rejects_new_background_and_credential_work(
             ),
             await client.post("/api/sync/run/qobuz"),
             await client.post("/api/library/scan-fuzzy"),
+            await client.post("/api/library/refresh/qobuz"),
+            await client.post(
+                f"/api/library/albums/{album_id}/mark-downloaded", json={}
+            ),
+            await client.post(f"/api/library/albums/{album_id}/unmark-downloaded"),
             await client.patch("/api/config", json={"qobuz_token": "token"}),
             await client.post("/api/auth/qobuz/oauth-callback", json={"code": "code"}),
         ]
 
     try:
-        assert [response.status_code for response in responses] == [503] * 5
+        assert [response.status_code for response in responses] == [503] * 8
         app.state.download_service.enqueue.assert_not_awaited()
         app.state.sync_service.run_sync.assert_not_awaited()
+        app.state.library_service.refresh_library.assert_not_awaited()
         scan.assert_not_awaited()
+        resolve_tracks.assert_not_awaited()
+        mark.assert_not_called()
+        unmark.assert_not_called()
+        app.state.event_bus.publish.assert_not_awaited()
         reload_clients.assert_not_awaited()
         exchange.assert_not_awaited()
     finally:
