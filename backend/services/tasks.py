@@ -25,7 +25,7 @@ async def await_task_completion(
     """
     caller = asyncio.current_task()
     initial_cancels = caller.cancelling() if caller is not None else 0
-    caller_cancelled = False
+    caller_cancelled = initial_cancels > 0
 
     while True:
         try:
@@ -34,9 +34,13 @@ async def await_task_completion(
             new_caller_cancel = (
                 caller is not None and caller.cancelling() > initial_cancels
             )
-            caller_cancelled = caller_cancelled or new_caller_cancel
             if not task.done():
+                # A pending owned future cannot be the source of the shield's
+                # CancelledError, even when cancel() preceded helper entry and
+                # is already included in initial_cancels.
+                caller_cancelled = True
                 continue
+            caller_cancelled = caller_cancelled or new_caller_cancel
             if task.cancelled():
                 if caller_cancelled or not suppress_inner_cancellation:
                     raise
