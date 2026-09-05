@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from pathlib import Path
 
 import mutagen
 
+from ..models.database import AlbumNotFoundError
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
@@ -303,59 +303,9 @@ def classify(meta: FolderMeta, index: LibraryIndex) -> MatchResult:
     )
 
 
-_DEDUP_SCHEMA = """
-CREATE TABLE IF NOT EXISTS downloads (
-    id TEXT PRIMARY KEY
-);
-"""
-
-
 def _dedup_db_path(source: str, dedup_db_dir: str) -> str:
     fname = "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
     return os.path.join(dedup_db_dir, fname)
-
-
-def _connect_dedup(path: str) -> sqlite3.Connection:
-    """Open a dedup DB the same way AppDatabase._connect opens the app DB.
-
-    The download service writes these files concurrently with a scan, so a
-    busy timeout and WAL journalling are what keep both sides from hitting
-    "database is locked".
-    """
-    conn = sqlite3.connect(path, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def _populate_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
-    """Insert track IDs into the per-source dedup DB. Idempotent."""
-    path = _dedup_db_path(source, dedup_db_dir)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    conn = _connect_dedup(path)
-    try:
-        conn.executescript(_DEDUP_SCHEMA)
-        conn.executemany(
-            "INSERT OR IGNORE INTO downloads (id) VALUES (?)",
-            [(tid,) for tid in track_ids],
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _remove_from_dedup(track_ids: list[str], source: str, dedup_db_dir: str) -> None:
-    path = _dedup_db_path(source, dedup_db_dir)
-    if not os.path.exists(path):
-        return
-    conn = _connect_dedup(path)
-    try:
-        conn.executemany(
-            "DELETE FROM downloads WHERE id = ?",
-            [(tid,) for tid in track_ids],
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _sentinel_payload(album: dict, downloaded_at: str) -> dict:
@@ -406,20 +356,21 @@ def mark_album_downloaded(
     Idempotent — calling repeatedly is safe. Sentinel writes degrade
     gracefully on read-only mounts.
     """
-    album = db.get_album(album_id)
-    if album is None:
-        raise ValueError(f"Album {album_id} not found")
     if not track_ids:
         raise ValueError("A complete non-empty track identity set is required")
 
+    album_hint = db.get_album(album_id)
+    if album_hint is None:
+        raise AlbumNotFoundError(f"Album {album_id} not found")
     downloaded_at = (now or datetime.now()).isoformat()
-    db.set_album_download_state(
+    album = db.apply_album_download_state(
         album_id,
-        downloaded_at=downloaded_at,
-        local_folder_path=local_folder_path,
+        True,
+        track_ids,
+        _dedup_db_path(album_hint["source"], dedup_db_dir),
+        downloaded_at,
+        local_folder_path,
     )
-
-    _populate_dedup(list(track_ids), album["source"], dedup_db_dir)
 
     if local_folder_path and sentinel_write_enabled:
         _write_sentinel(
@@ -435,21 +386,21 @@ def unmark_album_downloaded(
     dedup_db_dir: str,
     track_ids: tuple[str, ...],
 ) -> None:
-    album = db.get_album(album_id)
-    if album is None:
-        raise ValueError(f"Album {album_id} not found")
     if not track_ids:
         raise ValueError("A complete non-empty track identity set is required")
 
-    historical_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
-    all_track_ids = list(dict.fromkeys((*track_ids, *historical_ids)))
-
-    folder = album.get("local_folder_path")
-    _remove_sentinel(folder)
-
-    _remove_from_dedup(all_track_ids, album["source"], dedup_db_dir)
-
-    db.clear_album_download_state(album_id)
+    album = db.get_album(album_id)
+    if album is None:
+        raise AlbumNotFoundError(f"Album {album_id} not found")
+    old_album = db.apply_album_download_state(
+        album_id,
+        False,
+        track_ids,
+        _dedup_db_path(album["source"], dedup_db_dir),
+        None,
+        None,
+    )
+    _remove_sentinel(old_album.get("local_folder_path"))
 
 
 def _find_album_folders(root: Path, max_depth: int = 3) -> tuple[list[Path], list[str]]:

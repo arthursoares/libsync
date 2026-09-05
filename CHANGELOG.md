@@ -18,6 +18,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 - **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged.
 - **Tidal authentication transitions.** Completing device-code authentication now replaces a previously stored PKCE auth method, keeping persisted credentials and client initialization consistent.
 - **Reliable mark/unmark reconciliation.** Downloads now cache the complete authoritative track catalog before starting, while manual mark/unmark and fuzzy auto-mark refresh it online before changing album, sentinel, or dedup state. Mark/unmark now requires a connected source and fails clearly if the catalog is unavailable or incomplete.
+- **Atomic album/dedup updates.** Manual and scan mark/unmark now update album state and the per-source dedup database in one attached SQLite transaction, rolling both back on ordinary statement or lock failures. Best-effort sentinel writes and removals happen only after that mandatory commit.
 
 ---
 

@@ -249,10 +249,7 @@ async def test_run_scan_walks_artist_album_layout(
 async def test_run_scan_reports_failed_marks_and_keeps_going(
     tmp_path, library, clients, monkeypatch
 ):
-    """A single failing mark (e.g. a locked dedup DB) must not unwind the job
-    and throw away every album already marked."""
-    import backend.services.scan as scan_mod
-
+    """A single failing mark must not unwind the job or mark failed state."""
     music = tmp_path / "music"
     _album(music / "The Beatles - Abbey Road", 17)
     _album(music / "The Beatles - Revolver", 14)
@@ -268,14 +265,18 @@ async def test_run_scan_reports_failed_marks_and_keeps_going(
         },
     )
 
-    original = scan_mod.mark_album_downloaded
-
-    def flaky(db, album_id, **kwargs):
-        if album_id == 1:
-            raise sqlite3.OperationalError("database is locked")
-        return original(db, album_id, **kwargs)
-
-    monkeypatch.setattr(scan_mod, "mark_album_downloaded", flaky)
+    dedup_path = tmp_path / "downloads.db"
+    conn = sqlite3.connect(dedup_path)
+    try:
+        conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """CREATE TRIGGER fail_first_album
+               BEFORE INSERT ON downloads WHEN NEW.id LIKE '1-t%'
+               BEGIN SELECT RAISE(FAIL, 'dedup insert failed'); END"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     result = await run_scan(
         library,
@@ -297,7 +298,17 @@ async def test_run_scan_reports_failed_marks_and_keeps_going(
     entry = result["failed"][0]
     assert entry["album_id"] == 1
     assert "Abbey Road" in entry["folder"]
-    assert "database is locked" in entry["error"]
+    assert "dedup insert failed" in entry["error"]
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+    conn = sqlite3.connect(dedup_path)
+    try:
+        dedup_ids = {
+            row[0] for row in conn.execute("SELECT id FROM downloads").fetchall()
+        }
+    finally:
+        conn.close()
+    assert all(not track_id.startswith("1-t") for track_id in dedup_ids)
+    assert sum(track_id.startswith("2-t") for track_id in dedup_ids) == 14
 
 
 @pytest.mark.asyncio

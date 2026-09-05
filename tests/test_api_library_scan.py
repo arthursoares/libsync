@@ -101,9 +101,93 @@ class TestMarkDownloaded:
         assert resp.status_code == 200
         assert resp.json()["download_status"] == "not_downloaded"
 
-    async def test_unknown_album_returns_404(self, client):
+    async def test_unknown_album_returns_404(self, client, app):
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
         resp = await client.post("/api/library/albums/99999/mark-downloaded", json={})
         assert resp.status_code == 404
+        assert events == []
+
+    async def test_busy_album_reconciliation_returns_409_without_success_event(
+        self, client, app, album_id
+    ):
+        app.state.db.update_album_status(album_id, "downloading")
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded", json={}
+        )
+
+        assert resp.status_code == 409
+        assert "downloading" in resp.json()["error"]
+        assert app.state.db.get_album(album_id)["download_status"] == "downloading"
+        assert events == []
+
+    async def test_locked_dedup_database_returns_error_without_success_event(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "libsync.db"
+        monkeypatch.setenv("STREAMRIP_DB_PATH", str(db_path))
+        locked_app = create_app(db_path=str(db_path))
+        locked_app.state.db._sqlite_timeout = 0.05
+        album_id = locked_app.state.db.upsert_album(
+            "qobuz", "locked", "Locked", "Artist", track_count=1
+        )
+        track = SimpleNamespace(
+            id="locked-track",
+            title="Track",
+            performer=SimpleNamespace(name="Artist"),
+            track_number=1,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        sdk_client = MagicMock()
+        sdk_client.catalog.get_album_with_tracks = AsyncMock(
+            return_value=(SimpleNamespace(tracks_count=1), [track])
+        )
+        locked_app.state._clients_ref["qobuz"] = sdk_client
+        dedup_path = tmp_path / "downloads.db"
+        lock = sqlite3.connect(dedup_path)
+        lock.execute("PRAGMA journal_mode=WAL")
+        lock.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+        lock.commit()
+        lock.execute("BEGIN IMMEDIATE")
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        locked_app.state.event_bus.subscribe("album_status_changed", record)
+        resp = None
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=locked_app, raise_app_exceptions=False),
+                base_url="http://test",
+            ) as locked_client:
+                resp = await locked_client.post(
+                    f"/api/library/albums/{album_id}/mark-downloaded", json={}
+                )
+        finally:
+            lock.rollback()
+            lock.close()
+
+        assert resp is not None
+        assert resp.status_code == 500
+        assert locked_app.state.db.get_album(album_id)["download_status"] == (
+            "not_downloaded"
+        )
+        assert events == []
 
     async def test_rejects_path_outside_downloads_root(
         self, client, app, album_id, tmp_path
