@@ -6,6 +6,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 
 ### Fixed
 
+- **Completion detail refresh.** Queue UUID completion events now resolve the album's source and catalog ID before refreshing matching open details; late progress cannot restore completed queue items.
 - **Cancellation feedback.** Individual and bulk cancellation now reload the canonical queue immediately, updating active counts without WebSocket traffic and ignoring late progress for cancelled items.
 - **Search pagination.** Load More appends the next page without triggering a page-one reload; changing services still reruns the active query from page one.
 - **Sync selection effect loop.** Initial selection notifications no longer track parent state; deselection stays intact and replacement sync results reseed once.
