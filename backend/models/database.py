@@ -616,8 +616,8 @@ class AppDatabase:
                 reconciled_ids = list(dict.fromkeys(str(tid) for tid in track_ids))
                 if downloaded:
                     conn.executemany(
-                        """INSERT OR IGNORE INTO download_state_dedup.downloads (id)
-                           VALUES (?)""",
+                        """INSERT INTO download_state_dedup.downloads (id)
+                           VALUES (?) ON CONFLICT(id) DO NOTHING""",
                         [(track_id,) for track_id in reconciled_ids],
                     )
                     cursor = conn.execute(

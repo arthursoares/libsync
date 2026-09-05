@@ -254,6 +254,78 @@ def test_incompatible_dedup_database_errors_without_album_mutation(tmp_path):
     assert _album_state(db, album_id) == ("not_downloaded", None, None)
 
 
+@pytest.mark.parametrize(
+    ("schema", "seed_sql", "error", "sentinel_contents"),
+    [
+        (
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY, required TEXT NOT NULL)",
+            "INSERT INTO downloads (id, required) VALUES ('unrelated', 'keep')",
+            "NOT NULL constraint failed",
+            "existing",
+        ),
+        (
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY CHECK (id != 't2'))",
+            "INSERT INTO downloads (id) VALUES ('unrelated')",
+            "CHECK constraint failed",
+            None,
+        ),
+        (
+            "CREATE TABLE downloads (id TEXT)",
+            "INSERT INTO downloads (id) VALUES ('unrelated')",
+            "ON CONFLICT clause does not match",
+            "existing",
+        ),
+    ],
+)
+def test_incompatible_existing_schema_rolls_back_without_touching_sentinel(
+    tmp_path, schema, seed_sql, error, sentinel_contents
+):
+    db = AppDatabase(str(tmp_path / "libsync.db"))
+    album_id = _make_album(db)
+    old_folder = str(tmp_path / "old")
+    with db._connect() as conn:
+        conn.execute(
+            """UPDATE albums
+               SET download_status = 'failed', downloaded_at = ?, local_folder_path = ?
+               WHERE id = ?""",
+            ("2026-01-01T00:00:00", old_folder, album_id),
+        )
+    before = _album_state(db, album_id)
+
+    dedup_path = _dedup_path(tmp_path)
+    conn = sqlite3.connect(dedup_path)
+    try:
+        conn.execute(schema)
+        conn.execute(seed_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    folder = tmp_path / "music" / "Album"
+    folder.mkdir(parents=True)
+    sentinel = folder / ".streamrip.json"
+    if sentinel_contents is not None:
+        sentinel.write_text(sentinel_contents)
+
+    with pytest.raises(sqlite3.DatabaseError, match=error):
+        mark_album_downloaded(
+            db,
+            album_id,
+            local_folder_path=str(folder),
+            dedup_db_dir=str(tmp_path),
+            track_ids=TRACK_IDS,
+            sentinel_write_enabled=True,
+            now=NOW,
+        )
+
+    assert _album_state(db, album_id) == before
+    assert _dedup_ids(dedup_path) == {"unrelated"}
+    if sentinel_contents is None:
+        assert not sentinel.exists()
+    else:
+        assert sentinel.read_text() == sentinel_contents
+
+
 def test_missing_album_is_rejected_after_transaction_starts(tmp_path):
     db = AppDatabase(str(tmp_path / "libsync.db"))
 
