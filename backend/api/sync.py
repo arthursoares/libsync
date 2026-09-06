@@ -7,6 +7,7 @@ from ..services.sync import SyncServiceStoppingError
 from .lifecycle import require_work_admission
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
+SYNC_SERVICE_STOPPING_MESSAGE = "Sync service is shutting down"
 
 
 @router.get("/status/{source}")
@@ -21,8 +22,8 @@ async def run_sync(request: Request, source: str, download_new: bool = False):
     service = request.app.state.sync_service
     try:
         return await service.run_sync(source, download_new=download_new)
-    except SyncServiceStoppingError as error:
-        return JSONResponse({"error": str(error)}, status_code=503)
+    except SyncServiceStoppingError:
+        return JSONResponse({"error": SYNC_SERVICE_STOPPING_MESSAGE}, status_code=503)
 
 
 @router.get("/history")

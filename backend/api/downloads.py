@@ -10,6 +10,7 @@ from ..services.sentinels import reconcile_sentinels
 from .lifecycle import require_work_admission
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
+DOWNLOAD_SERVICE_STOPPING_MESSAGE = "Download service is shutting down"
 
 
 @router.get("/queue")
@@ -65,8 +66,10 @@ async def enqueue(request: Request, body: DownloadRequest):
         return await service.enqueue(
             body.source, body.album_ids, force=body.force, supplied_metadata=supplied
         )
-    except DownloadServiceStoppingError as error:
-        return JSONResponse({"error": str(error)}, status_code=503)
+    except DownloadServiceStoppingError:
+        return JSONResponse(
+            {"error": DOWNLOAD_SERVICE_STOPPING_MESSAGE}, status_code=503
+        )
 
 
 @router.delete("/queue/{item_id}")

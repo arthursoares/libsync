@@ -11,11 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.main import create_app
 from backend.models.database import AppDatabase
-from backend.services.download import DownloadService
+from backend.services.download import DownloadService, DownloadServiceStoppingError
 from backend.services.event_bus import EventBus
 from backend.services.library import LibraryService
 from backend.services.scan import FolderMeta, run_scan
-from backend.services.sync import SyncService
+from backend.services.sync import SyncService, SyncServiceStoppingError
 
 
 def _catalog_client(*, close=None):
@@ -47,6 +47,51 @@ async def _next_loop_turn():
     reached = asyncio.Event()
     asyncio.get_running_loop().call_soon(reached.set)
     await reached.wait()
+
+
+@pytest.mark.parametrize(
+    ("path", "service_name", "method_name", "error_type", "public_message"),
+    [
+        (
+            "/api/downloads/queue",
+            "download_service",
+            "enqueue",
+            DownloadServiceStoppingError,
+            "Download service is shutting down",
+        ),
+        (
+            "/api/sync/run/qobuz",
+            "sync_service",
+            "run_sync",
+            SyncServiceStoppingError,
+            "Sync service is shutting down",
+        ),
+    ],
+)
+async def test_service_stopping_errors_use_controlled_public_messages(
+    path, service_name, method_name, error_type, public_message
+):
+    app = create_app(db_path=":memory:")
+    marker = "service-internal-marker /private/runtime.state"
+    service = getattr(app.state, service_name)
+    method = AsyncMock(side_effect=error_type(marker))
+    setattr(service, method_name, method)
+
+    assert app.state.shutting_down is False
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        if path == "/api/downloads/queue":
+            response = await client.post(
+                path, json={"source": "qobuz", "album_ids": ["album"]}
+            )
+        else:
+            response = await client.post(path)
+
+    assert response.status_code == 503
+    assert response.json()["error"] == public_message
+    assert marker not in response.text
+    method.assert_awaited_once()
 
 
 async def test_lifespan_drains_current_album_without_advancing_queue(tmp_path):
