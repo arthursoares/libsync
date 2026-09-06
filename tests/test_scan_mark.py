@@ -280,3 +280,68 @@ def test_unmark_removes_current_and_historical_cached_ids(tmp_path, db):
 
     assert _dedup_rows(dedup_path) == []
     assert d.get_album(album_id)["download_status"] == "not_downloaded"
+
+
+def test_sentinel_write_failure_logs_after_mandatory_state_commits(
+    tmp_path, db, monkeypatch, caplog
+):
+    d, album_id = db
+    folder = tmp_path / "music" / "X"
+    folder.mkdir(parents=True)
+
+    def fail_open(*args, **kwargs):
+        raise PermissionError("read only")
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    mark_album_downloaded(
+        d,
+        album_id,
+        local_folder_path=str(folder),
+        dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
+    )
+
+    assert d.get_album(album_id)["download_status"] == "complete"
+    assert set(_dedup_rows(_dedup_path(tmp_path, "qobuz"))) == {("t1",), ("t2",)}
+    assert "could not write sentinel" in caplog.text
+
+
+def test_sentinel_delete_failure_logs_after_mandatory_state_commits(
+    tmp_path, db, monkeypatch, caplog
+):
+    import backend.services.scan as scan_mod
+
+    d, album_id = db
+    folder = tmp_path / "music" / "X"
+    folder.mkdir(parents=True)
+    sentinel = folder / ".streamrip.json"
+    sentinel.write_text("existing")
+    d.set_album_download_state(
+        album_id,
+        downloaded_at="2026-09-05T00:00:00",
+        local_folder_path=str(folder),
+    )
+    dedup_path = _dedup_path(tmp_path, "qobuz")
+    conn = sqlite3.connect(dedup_path)
+    try:
+        conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+        conn.executemany("INSERT INTO downloads (id) VALUES (?)", [("t1",), ("t2",)])
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fail_remove(*args, **kwargs):
+        raise PermissionError("read only")
+
+    monkeypatch.setattr(scan_mod.os, "remove", fail_remove)
+    unmark_album_downloaded(
+        d,
+        album_id,
+        dedup_db_dir=str(tmp_path),
+        track_ids=TRACK_IDS,
+    )
+
+    assert d.get_album(album_id)["download_status"] == "not_downloaded"
+    assert _dedup_rows(dedup_path) == []
+    assert sentinel.exists()
+    assert "could not remove sentinel" in caplog.text

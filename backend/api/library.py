@@ -3,12 +3,18 @@
 import asyncio
 import logging
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..models.database import (
+    AlbumDownloadStateConflictError,
+    AlbumDownloadStateError,
+    AlbumNotFoundError,
+)
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
 from ..services.download import _parse_bool
@@ -30,6 +36,11 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 MAX_FINISHED_SCAN_JOBS = 20
 TRACK_CLIENT_UNAVAILABLE_MESSAGE = "Connect the album source and retry."
 TRACK_IDENTITY_ERROR_MESSAGE = "Could not load a complete track catalog. Retry later."
+ALBUM_NOT_FOUND_MESSAGE = "Album not found"
+ALBUM_DOWNLOAD_STATE_CONFLICT_MESSAGE = (
+    "Album is queued or downloading. Wait for it to finish."
+)
+ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE = "Could not update album download state"
 
 
 def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
@@ -71,6 +82,20 @@ def _track_identity_error(error: TrackIdentityError) -> JSONResponse:
         else TRACK_IDENTITY_ERROR_MESSAGE
     )
     return JSONResponse({"error": message}, status_code=error.status_code)
+
+
+def _download_state_error(error: Exception) -> JSONResponse:
+    if isinstance(error, AlbumNotFoundError):
+        return JSONResponse(
+            {"error": ALBUM_NOT_FOUND_MESSAGE}, status_code=error.status_code
+        )
+    if isinstance(error, AlbumDownloadStateConflictError):
+        return JSONResponse(
+            {"error": ALBUM_DOWNLOAD_STATE_CONFLICT_MESSAGE},
+            status_code=error.status_code,
+        )
+    logger.exception("Could not reconcile album download state")
+    return JSONResponse({"error": ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE}, status_code=500)
 
 
 def _validate_local_folder_path(
@@ -163,15 +188,18 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
     except TrackIdentityError as error:
         return _track_identity_error(error)
 
-    await asyncio.to_thread(
-        mark_album_downloaded,
-        db,
-        album_id,
-        local_folder_path=resolved_path,
-        dedup_db_dir=_dedup_db_dir(),
-        track_ids=track_ids,
-        sentinel_write_enabled=sentinel_enabled,
-    )
+    try:
+        await asyncio.to_thread(
+            mark_album_downloaded,
+            db,
+            album_id,
+            local_folder_path=resolved_path,
+            dedup_db_dir=_dedup_db_dir(),
+            track_ids=track_ids,
+            sentinel_write_enabled=sentinel_enabled,
+        )
+    except (AlbumDownloadStateError, sqlite3.Error) as error:
+        return _download_state_error(error)
     await request.app.state.event_bus.publish(
         "album_status_changed",
         {"album_id": album_id, "status": "complete"},
@@ -192,13 +220,16 @@ async def unmark_downloaded(request: Request, album_id: int):
     except TrackIdentityError as error:
         return _track_identity_error(error)
 
-    await asyncio.to_thread(
-        unmark_album_downloaded,
-        db,
-        album_id,
-        dedup_db_dir=_dedup_db_dir(),
-        track_ids=track_ids,
-    )
+    try:
+        await asyncio.to_thread(
+            unmark_album_downloaded,
+            db,
+            album_id,
+            dedup_db_dir=_dedup_db_dir(),
+            track_ids=track_ids,
+        )
+    except (AlbumDownloadStateError, sqlite3.Error) as error:
+        return _download_state_error(error)
     await request.app.state.event_bus.publish(
         "album_status_changed",
         {"album_id": album_id, "status": "not_downloaded"},

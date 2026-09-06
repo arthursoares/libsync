@@ -4,12 +4,32 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 
 logger = logging.getLogger("streamrip")
 
 SCHEMA_VERSION = 2
+
+
+class AlbumDownloadStateError(RuntimeError):
+    """Album/dedup reconciliation could not be applied."""
+
+    status_code = 500
+
+
+class AlbumNotFoundError(AlbumDownloadStateError):
+    """The album disappeared before reconciliation acquired its transaction."""
+
+    status_code = 404
+
+
+class AlbumDownloadStateConflictError(AlbumDownloadStateError):
+    """An in-flight download owns the album state."""
+
+    status_code = 409
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -150,6 +170,8 @@ class AppDatabase:
 
     def __init__(self, path: str):
         self.path = path
+        self._connection_lock = threading.RLock()
+        self._sqlite_timeout = 30.0
         self._persistent_conn: sqlite3.Connection | None = None
         if path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -220,15 +242,18 @@ class AppDatabase:
     def _connect(self):
         if self._persistent_conn is not None:
             # Yield the persistent connection without closing it.
-            conn = self._persistent_conn
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            # Every :memory: caller shares this object, including worker-thread
+            # scan mutations, so connection use must be serialized.
+            with self._connection_lock:
+                conn = self._persistent_conn
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
         else:
-            conn = sqlite3.connect(self.path, timeout=30)
+            conn = sqlite3.connect(self.path, timeout=self._sqlite_timeout)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.row_factory = sqlite3.Row
@@ -503,6 +528,149 @@ class AppDatabase:
                    WHERE id = ?""",
                 (album_id,),
             )
+
+    def apply_album_download_state(
+        self,
+        album_id: int,
+        downloaded: bool,
+        track_ids: tuple[str, ...],
+        dedup_db_path: str,
+        downloaded_at: str | None,
+        local_folder_path: str | None,
+    ) -> dict:
+        """Reconcile album and per-source dedup state in one transaction.
+
+        The dedup database is attached to the app connection so ordinary SQL,
+        locking, and application failures roll both databases back together.
+        This does not promise crash atomicity across separate WAL files.
+        Returns the album snapshot read after the write transaction starts;
+        callers use its old folder for post-commit sentinel cleanup.
+        """
+        if not track_ids:
+            raise ValueError("A complete non-empty track identity set is required")
+        if downloaded and not downloaded_at:
+            raise ValueError("downloaded_at is required when marking an album")
+        if not isinstance(dedup_db_path, str) or not dedup_db_path.strip():
+            raise ValueError("dedup_db_path must be a filesystem path")
+        if "\x00" in dedup_db_path or dedup_db_path == ":memory:":
+            raise ValueError("dedup_db_path must be a filesystem path")
+
+        dedup_path = os.path.abspath(dedup_db_path)
+        if self.path != ":memory:" and os.path.realpath(dedup_path) == os.path.realpath(
+            os.path.abspath(self.path)
+        ):
+            raise ValueError("The dedup database must differ from the app database")
+        os.makedirs(os.path.dirname(dedup_path) or ".", exist_ok=True)
+
+        persistent = self._persistent_conn is not None
+        lock = self._connection_lock
+        lock.acquire()
+        conn: sqlite3.Connection | None = None
+        attached = False
+        try:
+            conn = self._persistent_conn
+            if conn is None:
+                conn = sqlite3.connect(
+                    self.path,
+                    timeout=self._sqlite_timeout,
+                    isolation_level=None,
+                )
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.row_factory = sqlite3.Row
+
+            conn.execute(
+                "ATTACH DATABASE ? AS download_state_dedup",
+                (dedup_path,),
+            )
+            attached = True
+            conn.execute("PRAGMA download_state_dedup.journal_mode=WAL")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM albums WHERE id = ?", (album_id,)
+                ).fetchone()
+                if row is None:
+                    raise AlbumNotFoundError(f"Album {album_id} not found")
+                album = dict(row)
+                if album["download_status"] in {"queued", "downloading"}:
+                    raise AlbumDownloadStateConflictError(
+                        f"Album {album_id} is currently {album['download_status']}"
+                    )
+
+                expected_name = (
+                    "downloads.db"
+                    if album["source"] == "qobuz"
+                    else f"downloads-{album['source']}.db"
+                )
+                if os.path.basename(dedup_path) != expected_name:
+                    raise ValueError(
+                        f"Expected {expected_name} for {album['source']} dedup state"
+                    )
+
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS
+                       download_state_dedup.downloads (id TEXT PRIMARY KEY)"""
+                )
+
+                reconciled_ids = list(dict.fromkeys(str(tid) for tid in track_ids))
+                if downloaded:
+                    conn.executemany(
+                        """INSERT INTO download_state_dedup.downloads (id)
+                           VALUES (?) ON CONFLICT(id) DO NOTHING""",
+                        [(track_id,) for track_id in reconciled_ids],
+                    )
+                    cursor = conn.execute(
+                        """UPDATE albums
+                           SET download_status = 'complete',
+                               downloaded_at = ?,
+                               local_folder_path = COALESCE(?, local_folder_path)
+                           WHERE id = ?""",
+                        (downloaded_at, local_folder_path, album_id),
+                    )
+                else:
+                    historical_ids = [
+                        row["source_track_id"]
+                        for row in conn.execute(
+                            "SELECT source_track_id FROM tracks WHERE album_id = ?",
+                            (album_id,),
+                        ).fetchall()
+                    ]
+                    reconciled_ids = list(
+                        dict.fromkeys((*reconciled_ids, *historical_ids))
+                    )
+                    conn.executemany(
+                        "DELETE FROM download_state_dedup.downloads WHERE id = ?",
+                        [(track_id,) for track_id in reconciled_ids],
+                    )
+                    cursor = conn.execute(
+                        """UPDATE albums
+                           SET download_status = 'not_downloaded',
+                               downloaded_at = NULL,
+                               local_folder_path = NULL
+                           WHERE id = ?""",
+                        (album_id,),
+                    )
+
+                if cursor.rowcount != 1:
+                    raise AlbumNotFoundError(f"Album {album_id} not found")
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        finally:
+            try:
+                if attached and conn is not None:
+                    conn.execute("DETACH DATABASE download_state_dedup")
+            finally:
+                try:
+                    if not persistent and conn is not None:
+                        conn.close()
+                finally:
+                    lock.release()
+
+        return album
 
     def count_albums(
         self,
