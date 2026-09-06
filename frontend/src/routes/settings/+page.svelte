@@ -81,29 +81,79 @@
   let scanOpen = $state(false);
   let scanResultState = $state<any>({ status: 'running', scanned: 0, total: 0 });
   let scanJobId = $state<string | null>(null);
-  let scanPollTimer: ReturnType<typeof setInterval> | null = null;
+  let scanPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let scanController: AbortController | null = null;
+  let scanGeneration = 0;
+  let scanRetryable = $state(false);
 
   let confirmFlush = $state(false);
   let flushResult = $state<string | null>(null);
 
   async function scanDownloads() {
+    stopScanPolling();
+    const generation = scanGeneration;
+    const controller = new AbortController();
+    scanController = controller;
+    scanJobId = null;
+    scanRetryable = false;
     scanOpen = true;
     scanResultState = { status: 'running', scanned: 0, total: 0 };
     try {
-      const { job_id } = await api.library.scanFuzzy();
+      const { job_id } = await api.library.scanFuzzy(controller.signal);
+      if (generation !== scanGeneration) return;
       scanJobId = job_id;
-      scanPollTimer = setInterval(async () => {
-        if (!scanJobId) return;
-        const data = await api.library.scanFuzzyStatus(scanJobId);
-        scanResultState = data;
-        if (data.status !== 'running') {
-          if (scanPollTimer) clearInterval(scanPollTimer);
-          scanPollTimer = null;
-        }
-      }, 500);
+      scheduleScanPoll(job_id, generation, controller.signal);
     } catch (e: any) {
-      scanResultState = { status: 'error', error: e?.message ?? 'Scan failed' };
+      if (generation !== scanGeneration) return;
+      scanResultState = { status: 'error', error: e?.message ?? 'Could not start scan. Please try again.' };
     }
+  }
+
+  function stopScanPolling() {
+    scanGeneration++;
+    scanController?.abort();
+    scanController = null;
+    if (scanPollTimer) clearTimeout(scanPollTimer);
+    scanPollTimer = null;
+  }
+
+  function scheduleScanPoll(jobId: string, generation: number, signal: AbortSignal) {
+    scanPollTimer = setTimeout(() => {
+      scanPollTimer = null;
+      void pollScan(jobId, generation, signal);
+    }, 500);
+  }
+
+  async function pollScan(jobId: string, generation: number, signal: AbortSignal) {
+    if (generation !== scanGeneration) return;
+    try {
+      const data = await api.library.scanFuzzyStatus(jobId, signal);
+      if (generation !== scanGeneration) return;
+      scanResultState = data;
+      // Schedule only after the preceding request finishes: never overlap polls.
+      if (data.status === 'running') scheduleScanPoll(jobId, generation, signal);
+    } catch (e: any) {
+      if (generation !== scanGeneration) return;
+      const missing = e?.status === 404;
+      scanRetryable = !missing;
+      if (missing) scanJobId = null;
+      scanResultState = {
+        status: 'error',
+        error: missing
+          ? 'This scan is no longer available. Start a new scan.'
+          : 'Could not check scan progress. Try checking again.',
+      };
+    }
+  }
+
+  function retryScanStatus() {
+    if (!scanJobId || !scanRetryable) return;
+    const jobId = scanJobId;
+    stopScanPolling();
+    scanController = new AbortController();
+    scanRetryable = false;
+    scanResultState = { status: 'running', scanned: 0, total: 0 };
+    scheduleScanPoll(jobId, scanGeneration, scanController.signal);
   }
 
   async function onScanConfirm(albumId: number, folder: string) {
@@ -112,9 +162,9 @@
 
   function onScanClose() {
     scanOpen = false;
-    if (scanPollTimer) clearInterval(scanPollTimer);
-    scanPollTimer = null;
+    stopScanPolling();
     scanJobId = null;
+    scanRetryable = false;
   }
 
   async function flushDatabase() {
@@ -362,7 +412,7 @@
   onDestroy(() => {
     configRequest++;
     if (_tidalPollTimerId !== null) clearInterval(_tidalPollTimerId);
-    if (scanPollTimer) clearInterval(scanPollTimer);
+    stopScanPolling();
   });
 
   onMount(() => {
@@ -783,8 +833,8 @@
       <div class="settings-label-sub">Scan download folder for existing albums and sync with database</div>
     </div>
     <div style="display: flex; gap: var(--space-2); align-items: center;">
-      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanJobId !== null}>
-        {scanJobId !== null ? 'Scanning…' : '▸ Scan Folder'}
+      <button class="btn btn-secondary btn-sm" onclick={scanDownloads} disabled={scanOpen}>
+        {scanOpen ? 'Scanning…' : '▸ Scan Folder'}
       </button>
     </div>
   </div>
@@ -971,7 +1021,9 @@
 </div>
 
 {#if scanOpen}
-  <ScanReview result={scanResultState} onConfirm={onScanConfirm} onClose={onScanClose} />
+  <ScanReview result={scanResultState} onConfirm={onScanConfirm} onClose={onScanClose}
+    onRetry={scanRetryable ? retryScanStatus : undefined}
+    onRestart={scanRetryable ? undefined : scanDownloads} />
 {/if}
 
 {/if}
