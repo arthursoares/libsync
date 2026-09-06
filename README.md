@@ -69,6 +69,8 @@ Config, credentials, and the library database land in `./data` next to the compo
 
 The `:latest` tag tracks stable releases. Swap to `:main` or `:dev` if you want rolling branch builds.
 
+The container runs as a fixed non-root user (uid/gid `1000`), so the host directories you mount to `/music` and `/data` must be writable by that uid — run `sudo chown -R 1000:1000 ./music ./data` (or the paths you mounted) if they're currently owned by another user, e.g. `root` from before this change or from a fresh `mkdir`.
+
 ## Quick start — local dev
 
 ```bash

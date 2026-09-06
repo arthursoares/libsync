@@ -6,6 +6,10 @@ services:
     ports:
       - "8080:8080"
     volumes:
+      # The container runs as uid/gid 1000 (non-root). An empty
+      # streamrip-data volume is created with that ownership automatically,
+      # but /mnt/music (and any pre-existing streamrip-data volume) must be
+      # writable by uid 1000, e.g.: sudo chown -R 1000:1000 /mnt/music
       - /mnt/music:/music
       - streamrip-data:/data
     environment:
