@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -18,6 +17,7 @@ from ..models.database import (
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
 from ..services.download import _parse_bool
+from ..services.paths import resolve_database_dir, resolve_downloads_root
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
 from ..services.tracks import (
     TrackClientUnavailableError,
@@ -59,22 +59,6 @@ def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
         jobs.pop(job_id, None)
 
 
-def _dedup_db_dir() -> str:
-    db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
-    return os.path.dirname(db_path) or "data"
-
-
-def _resolve_downloads_root(db) -> str:
-    """Resolve the downloads root using the same chain as DownloadService:
-    DB config → STREAMRIP_DOWNLOADS_PATH env var → '/music' fallback.
-    """
-    return (
-        db.get_config("downloads_path")
-        or os.environ.get("STREAMRIP_DOWNLOADS_PATH")
-        or "/music"
-    )
-
-
 def _track_identity_error(error: TrackIdentityError) -> JSONResponse:
     message = (
         TRACK_CLIENT_UNAVAILABLE_MESSAGE
@@ -109,7 +93,7 @@ def _validate_local_folder_path(
     """
     if raw is None:
         return None, None
-    downloads_root_cfg = _resolve_downloads_root(db)
+    downloads_root_cfg = resolve_downloads_root(db)
     try:
         resolved = Path(raw).resolve(strict=False)
         root = Path(downloads_root_cfg).resolve(strict=False)
@@ -194,7 +178,7 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
             db,
             album_id,
             local_folder_path=resolved_path,
-            dedup_db_dir=_dedup_db_dir(),
+            dedup_db_dir=resolve_database_dir(db),
             track_ids=track_ids,
             sentinel_write_enabled=sentinel_enabled,
         )
@@ -225,7 +209,7 @@ async def unmark_downloaded(request: Request, album_id: int):
             unmark_album_downloaded,
             db,
             album_id,
-            dedup_db_dir=_dedup_db_dir(),
+            dedup_db_dir=resolve_database_dir(db),
             track_ids=track_ids,
         )
     except (AlbumDownloadStateError, sqlite3.Error) as error:
@@ -246,7 +230,7 @@ async def start_scan(request: Request):
         )
 
     db = app.state.db
-    download_path = _resolve_downloads_root(db)
+    download_path = resolve_downloads_root(db)
     sentinel_enabled = _parse_bool(
         db.get_config("scan_sentinel_write_enabled"), default=True
     )
@@ -288,7 +272,7 @@ async def start_scan(request: Request):
                 db,
                 clients=app.state._clients_ref,
                 download_path=download_path,
-                dedup_db_dir=_dedup_db_dir(),
+                dedup_db_dir=resolve_database_dir(db),
                 event_bus=tracked_bus,
                 sentinel_write_enabled=sentinel_enabled,
             )
