@@ -192,11 +192,12 @@
 
   // Re-run search when source changes (if there's an active query)
   $effect(() => {
-    const _s = source;
-    if (activeQuery) {
-      currentPage = 1;
-      runSearch(activeQuery);
-    }
+    source;
+    // runSearch reads and changes pagination; only source belongs in this
+    // effect's dependencies, not currentPage or the last submitted query.
+    untrack(() => {
+      if (activeQuery) runSearch(activeQuery);
+    });
   });
 
   let searchInput: HTMLInputElement;

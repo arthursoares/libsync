@@ -89,3 +89,11 @@ clear. Open a detail panel, delay its response in Network tools, switch service,
 and confirm the panel closes and does not return when the old response arrives.
 Use mocked download requests when checking the queued service/catalog-ID pair;
 detail GETs intentionally use the local database ID instead of the catalog ID.
+
+For a manual pagination check with mocked search responses, load a multi-page
+query and click Load More. Network tools should show the next page only, with
+earlier albums still present after it completes. Switching service should issue
+one page-one request for the active query and discard any late previous-service
+page. For SyncDiff, use a saved or mocked result with new albums: check that the
+initial selection count settles, deselect a row, and confirm it stays deselected
+without console errors until replacement results arrive.
