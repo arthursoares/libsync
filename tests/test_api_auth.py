@@ -372,9 +372,7 @@ class TestTidalPoll:
         candidate.__aenter__ = AsyncMock(return_value=candidate)
         candidate.__aexit__ = AsyncMock(return_value=None)
         candidate.favorites = Mock()
-        candidate.favorites.get_albums = AsyncMock(
-            side_effect=RuntimeError(marker)
-        )
+        candidate.favorites.get_albums = AsyncMock(side_effect=RuntimeError(marker))
 
         def build_client(source, config, *, strict=False):
             assert source == "tidal"
