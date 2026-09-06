@@ -858,9 +858,29 @@ class AppDatabase:
         with self._connect() as conn:
             conn.execute(
                 """UPDATE sync_runs SET completed_at=?, status='failed'
-                   WHERE id=?""",
+                   WHERE id=? AND status='running'""",
                 (datetime.now().isoformat(), run_id),
             )
+
+    def interrupt_sync_run(self, run_id: int) -> bool:
+        """Mark one still-running sync interrupted without overwriting a result."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE sync_runs SET completed_at=?, status='interrupted'
+                   WHERE id=? AND status='running'""",
+                (datetime.now().isoformat(), run_id),
+            )
+            return cursor.rowcount > 0
+
+    def interrupt_running_sync_runs(self) -> int:
+        """Recover sync history left running by a previous process."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE sync_runs SET completed_at=?, status='interrupted'
+                   WHERE status='running'""",
+                (datetime.now().isoformat(),),
+            )
+            return cursor.rowcount
 
     def get_sync_history(self, source: str, limit: int = 10) -> list[dict]:
         with self._connect() as conn:

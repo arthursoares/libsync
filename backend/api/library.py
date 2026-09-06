@@ -19,11 +19,13 @@ from ..services import scan as scan_service
 from ..services.download import _parse_bool
 from ..services.paths import resolve_database_dir, resolve_downloads_root
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
+from ..services.tasks import run_thread_write
 from ..services.tracks import (
     TrackClientUnavailableError,
     TrackIdentityError,
     resolve_album_track_ids,
 )
+from .lifecycle import require_work_admission
 
 logger = logging.getLogger("streamrip")
 
@@ -147,12 +149,14 @@ async def get_album_detail(request: Request, source: str, album_id: int):
 
 @router.post("/refresh/{source}")
 async def refresh_library(request: Request, source: str):
+    require_work_admission(request)
     service = request.app.state.library_service
     return await service.refresh_library(source)
 
 
 @router.post("/albums/{album_id}/mark-downloaded")
 async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedRequest):
+    require_work_admission(request)
     db = request.app.state.db
     if db.get_album(album_id) is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
@@ -173,7 +177,7 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
         return _track_identity_error(error)
 
     try:
-        await asyncio.to_thread(
+        await run_thread_write(
             mark_album_downloaded,
             db,
             album_id,
@@ -181,6 +185,7 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
             dedup_db_dir=resolve_database_dir(db),
             track_ids=track_ids,
             sentinel_write_enabled=sentinel_enabled,
+            operation="manual mark-downloaded write",
         )
     except (AlbumDownloadStateError, sqlite3.Error) as error:
         return _download_state_error(error)
@@ -193,6 +198,7 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
 
 @router.post("/albums/{album_id}/unmark-downloaded")
 async def unmark_downloaded(request: Request, album_id: int):
+    require_work_admission(request)
     db = request.app.state.db
     if db.get_album(album_id) is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
@@ -205,12 +211,13 @@ async def unmark_downloaded(request: Request, album_id: int):
         return _track_identity_error(error)
 
     try:
-        await asyncio.to_thread(
+        await run_thread_write(
             unmark_album_downloaded,
             db,
             album_id,
             dedup_db_dir=resolve_database_dir(db),
             track_ids=track_ids,
+            operation="manual unmark-downloaded write",
         )
     except (AlbumDownloadStateError, sqlite3.Error) as error:
         return _download_state_error(error)
@@ -223,6 +230,7 @@ async def unmark_downloaded(request: Request, album_id: int):
 
 @router.post("/scan-fuzzy")
 async def start_scan(request: Request):
+    require_work_admission(request)
     app = request.app
     if app.state.active_scan_job is not None:
         return JSONResponse(
@@ -275,8 +283,15 @@ async def start_scan(request: Request):
                 dedup_db_dir=resolve_database_dir(db),
                 event_bus=tracked_bus,
                 sentinel_write_enabled=sentinel_enabled,
+                stop_event=app.state.scan_stop_event,
             )
             app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
+        except asyncio.CancelledError:
+            app.state.scan_jobs[job_id] = {
+                "status": "complete",
+                "result": {"status": "interrupted"},
+            }
+            raise
         except Exception:
             logger.exception("scan-fuzzy job %s failed", job_id)
             app.state.scan_jobs[job_id] = {
@@ -284,11 +299,12 @@ async def start_scan(request: Request):
                 "result": {"error": "Scan failed — see server logs"},
             }
         finally:
-            app.state.active_scan_job = None
+            if app.state.active_scan_job == job_id:
+                app.state.active_scan_job = None
 
     task = asyncio.create_task(runner())
-    # Keep a strong reference so the task is not garbage-collected before completion.
-    app.state.scan_jobs[job_id]["_task"] = task
+    app.state.scan_tasks.add(task)
+    task.add_done_callback(app.state.scan_tasks.discard)
     return {"job_id": job_id}
 
 

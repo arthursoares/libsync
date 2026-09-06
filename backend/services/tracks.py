@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from ..models.database import AppDatabase
+from .tasks import run_thread_write
 
 
 class TrackIdentityError(RuntimeError):
@@ -141,10 +140,11 @@ async def resolve_album_track_ids(
             f"Could not normalize the complete {source.title()} track catalog: {error}"
         ) from error
 
-    await asyncio.to_thread(
+    await run_thread_write(
         db.cache_album_tracks,
         album_id,
         normalized,
         authoritative_count=authoritative_count,
+        operation="album track cache write",
     )
     return tuple(track["source_track_id"] for track in normalized)

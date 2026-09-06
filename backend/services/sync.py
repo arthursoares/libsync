@@ -5,8 +5,13 @@ import logging
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .tasks import await_task_completion
 
 logger = logging.getLogger("streamrip")
+
+
+class SyncServiceStoppingError(RuntimeError):
+    """The sync service is shutting down and no longer accepts work."""
 
 
 class SyncService:
@@ -24,6 +29,9 @@ class SyncService:
         self.library_service = library_service
         self.download_service = download_service
         self._auto_sync_task: asyncio.Task | None = None
+        self._sync_tasks: set[asyncio.Task] = set()
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._stopping = False
 
     async def get_diff(self, source: str) -> dict:
         """Compare streaming library against local database."""
@@ -85,13 +93,20 @@ class SyncService:
         themselves run async in the worker — this method does not block
         on completion.
         """
-        run_id = self.db.create_sync_run(source)
+        if self._stopping:
+            raise SyncServiceStoppingError("Sync service is shutting down")
 
-        await self.event_bus.publish(
-            "sync_started", {"source": source, "run_id": run_id}
-        )
+        current = asyncio.current_task()
+        if current is not None:
+            self._sync_tasks.add(current)
+        run_id: int | None = None
 
         try:
+            run_id = self.db.create_sync_run(source)
+            await self.event_bus.publish(
+                "sync_started", {"source": source, "run_id": run_id}
+            )
+
             # Refresh library from streaming API.  refresh_library returns
             # the IDs of newly-discovered albums so we can enqueue them for
             # download *before* a second get_diff pass (which would see them
@@ -137,18 +152,26 @@ class SyncService:
                 "albums_downloaded": albums_downloaded,
                 "status": "complete",
             }
+        except asyncio.CancelledError:
+            if run_id is not None:
+                self.db.interrupt_sync_run(run_id)
+            raise
         except Exception as e:
             logger.exception("Sync failed for %s", source)
-            self.db.fail_sync_run(run_id)
+            if run_id is not None:
+                self.db.fail_sync_run(run_id)
             return {"run_id": run_id, "status": "failed", "error": str(e)}
+        finally:
+            if current is not None:
+                self._sync_tasks.discard(current)
 
     async def get_history(self, source: str, limit: int = 10) -> list[dict]:
         return self.db.get_sync_history(source, limit=limit)
 
-    def start_auto_sync(
+    async def start_auto_sync(
         self,
         source: str,
-        interval_seconds: int,
+        interval_seconds: float,
         download_new: bool = True,
     ):
         """Start a background auto-sync task.
@@ -158,12 +181,17 @@ class SyncService:
         download.  Set to False to refresh the library only without
         kicking off downloads.
         """
-        if self._auto_sync_task and not self._auto_sync_task.done():
-            self._auto_sync_task.cancel()
+        if self._stopping:
+            raise SyncServiceStoppingError("Sync service is shutting down")
+        await self.stop_auto_sync()
+        if self._stopping:
+            raise SyncServiceStoppingError("Sync service is shutting down")
 
         async def _auto_sync_loop():
-            while True:
+            while not self._stopping:
                 await asyncio.sleep(interval_seconds)
+                if self._stopping:
+                    break
                 try:
                     logger.info(
                         "Auto-sync running for %s (download_new=%s)",
@@ -171,12 +199,63 @@ class SyncService:
                         download_new,
                     )
                     await self.run_sync(source, download_new=download_new)
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     logger.exception("Auto-sync failed for %s", source)
 
-        self._auto_sync_task = asyncio.create_task(_auto_sync_loop())
+        task = asyncio.create_task(_auto_sync_loop())
+        self._auto_sync_task = task
 
-    def stop_auto_sync(self):
-        if self._auto_sync_task and not self._auto_sync_task.done():
-            self._auto_sync_task.cancel()
-            self._auto_sync_task = None
+        def clear_finished(done: asyncio.Task) -> None:
+            if self._auto_sync_task is done:
+                self._auto_sync_task = None
+
+        task.add_done_callback(clear_finished)
+
+    async def stop_auto_sync(self) -> None:
+        task = self._auto_sync_task
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await await_task_completion(
+                task,
+                operation="auto-sync scheduler stop",
+                suppress_inner_cancellation=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Auto-sync scheduler failed while stopping")
+        finally:
+            if task.done() and self._auto_sync_task is task:
+                self._auto_sync_task = None
+
+    def begin_shutdown(self) -> None:
+        """Synchronously close manual and scheduled sync admission."""
+        self._stopping = True
+
+    async def _drain_shutdown(self) -> None:
+        await self.stop_auto_sync()
+
+        current = asyncio.current_task()
+        tasks = {
+            task for task in self._sync_tasks if task is not current and not task.done()
+        }
+        if tasks:
+            logger.info("Shutdown interrupting %d active sync task(s)", len(tasks))
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        """Stop scheduled work and retain drainage through caller cancellation."""
+        self.begin_shutdown()
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._drain_shutdown())
+        await await_task_completion(
+            self._shutdown_task,
+            operation="sync service shutdown",
+        )

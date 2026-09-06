@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from .lifecycle import require_work_admission
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger("streamrip")
 
@@ -64,6 +66,8 @@ async def qobuz_oauth_callback_redirect(request: Request, code_autorisation: str
     code, persist credentials, reload clients, then redirect the browser
     back to the Settings page with a success/error query param.
     """
+    require_work_admission(request)
+
     from qobuz.auth import exchange_code
 
     if not code_autorisation:
@@ -94,6 +98,7 @@ class OAuthCodeRequest(BaseModel):
 @router.post("/qobuz/oauth-callback")
 async def qobuz_oauth_callback(request: Request, body: OAuthCodeRequest):
     """Exchange an OAuth code for credentials and save them."""
+    require_work_admission(request)
     from qobuz.auth import exchange_code
 
     try:
@@ -132,6 +137,8 @@ async def qobuz_oauth_from_url(request: Request, body: OAuthRedirectRequest):
 
     For headless/remote machines where the browser callback can't reach localhost.
     """
+    require_work_admission(request)
+
     from qobuz.auth import exchange_code, extract_code_from_url
 
     try:
@@ -203,6 +210,8 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
     ``{"status": "authorized", "user_id": ...}`` on success, or
     ``{"status": "error", "error": "..."}`` on failure.
     """
+    require_work_admission(request)
+
     from tidal.auth import poll_device_code
 
     try:
@@ -269,6 +278,8 @@ class TidalPkceCompleteRequest(BaseModel):
 async def tidal_pkce_complete(request: Request, body: TidalPkceCompleteRequest):
     """Finish PKCE: exchange the auth code from the user's pasted URL for
     access + refresh tokens, persist them, and hot-reload the client."""
+    require_work_admission(request)
+
     from tidal.auth import exchange_pkce_code, extract_code_from_redirect
 
     pending = _pkce_pending.pop(body.handle, None)

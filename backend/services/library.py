@@ -1,11 +1,11 @@
 """Library service — fetches and caches streaming library state."""
 
-import asyncio
 import logging
 from typing import ClassVar
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .tasks import run_thread_write
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
@@ -92,7 +92,11 @@ class LibraryService:
 
         # Batch every upsert into one connection/transaction off the event
         # loop instead of one SQLite connection per album (#25).
-        await asyncio.to_thread(self.db.upsert_albums, rows)
+        await run_thread_write(
+            self.db.upsert_albums,
+            rows,
+            operation="library album batch write",
+        )
 
         await self.event_bus.publish(
             "library_updated",

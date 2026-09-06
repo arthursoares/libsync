@@ -96,11 +96,22 @@ The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter
 - **Force re-download** toggle bypasses the dedup DB for single downloads
 - Failed tracks don't cancel the album; the `AlbumDownloader` uses `asyncio.gather(..., return_exceptions=True)` under a semaphore so one bad track can't block the rest
 - Success threshold: if fewer than 80% of tracks downloaded, the whole album is marked failed (configurable in code, not yet in UI)
+- Manual cancellation is soft for an active album: the SDK finishes that album, then Libsync records it as cancelled and does not advance it as complete
 
 ### Sync
 
 - **Auto-sync** — on a schedule (1h / 6h / daily) the backend re-runs a library refresh and optionally auto-downloads new albums
 - **Sync history** — every manual or auto-sync run is recorded in the `sync_runs` table with counts of found / new / removed / downloaded
+- Syncs interrupted by shutdown are retained in history with status `interrupted`
+
+### Shutdown behavior
+
+- Once shutdown begins, new downloads, manual syncs, scans, and credential writes return HTTP 503
+- The current album is allowed to drain because the SDK has no downloader-wide cancellation cleanup; queued albums are cancelled without starting
+- Fuzzy scans stop between folders and wait for any already-dispatched database mutation to finish
+- SDK clients close only after owned download, sync, scan, and progress-event tasks finish
+- Repeated cancellation of the shutdown caller is deferred until that complete drainage and client cleanup operation finishes
+- Libsync does not impose an internal drain timeout. The process supervisor controls hard-termination timing if an SDK operation cannot finish.
 
 ### Settings
 

@@ -10,9 +10,14 @@ from typing import Any
 from ..models.database import AppDatabase
 from .event_bus import EventBus
 from .paths import resolve_database_dir
+from .tasks import await_task_completion
 from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
+
+
+class DownloadServiceStoppingError(RuntimeError):
+    """The download service is draining and no longer accepts work."""
 
 
 def _parse_bool(value: str | None, *, default: bool) -> bool:
@@ -105,6 +110,13 @@ class DownloadService:
         self._queue: list[dict[str, Any]] = []
         self._cancel_requested: set[str] = set()
         self._worker_task: asyncio.Task | None = None
+        self._progress_tasks: set[asyncio.Task] = set()
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._stopping = False
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopping
 
     async def _fetch_album_metadata(self, source: str, source_album_id: str) -> dict:
         """Fetch real album metadata from the streaming service.
@@ -174,11 +186,20 @@ class DownloadService:
         force: bool = False,
         supplied_metadata: dict[str, dict] | None = None,
     ) -> list[dict]:
+        if self._stopping:
+            raise DownloadServiceStoppingError("Download service is shutting down")
         items = []
         errors: list[Exception] = []
         supplied_metadata = supplied_metadata or {}
         try:
             for source_album_id in album_ids:
+                if self._stopping:
+                    errors.append(
+                        DownloadServiceStoppingError(
+                            "Download service is shutting down"
+                        )
+                    )
+                    break
                 # One unresolvable album must not abort the batch: the albums
                 # queued ahead of it are already marked "queued" in the DB, and
                 # bailing out here would strand them with no worker started.
@@ -201,6 +222,10 @@ class DownloadService:
                         else:
                             meta = await self._fetch_album_metadata(
                                 source, source_album_id
+                            )
+                        if self._stopping:
+                            raise DownloadServiceStoppingError(
+                                "Download service is shutting down"
                             )
                         album_id = self.db.upsert_album(
                             source=source,
@@ -252,8 +277,10 @@ class DownloadService:
         finally:
             # In a `finally` so whatever did get queued always gets a worker,
             # even if the loop exits early.
-            if any(q["status"] == "pending" for q in self._queue) and (
-                self._worker_task is None or self._worker_task.done()
+            if (
+                not self._stopping
+                and any(q["status"] == "pending" for q in self._queue)
+                and (self._worker_task is None or self._worker_task.done())
             ):
                 self._worker_task = asyncio.create_task(self._process_queue())
 
@@ -311,89 +338,180 @@ class DownloadService:
         ]
         await self.cancel(ids)
 
-    async def _process_queue(self):
-        while True:
-            pending = [item for item in self._queue if item["status"] == "pending"]
-            if not pending:
-                break
-            item = pending[0]
-            if item["id"] in self._cancel_requested:
-                item["status"] = "cancelled"
-                self._cancel_requested.discard(item["id"])
-                self._prune_queue()
+    def _settle_pending_for_shutdown(self) -> list[tuple[str, BaseException]]:
+        errors: list[tuple[str, BaseException]] = []
+        for item in self._queue:
+            if item["status"] != "pending":
                 continue
+            item["status"] = "cancelled"
+            try:
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
+            except Exception as error:
+                errors.append(
+                    (f"pending album {item['source_album_id']} status", error)
+                )
+        return errors
 
-            item["status"] = "downloading"
-            self.db.update_album_status(item["album_db_id"], "downloading")
-            await self.event_bus.publish(
-                "download_progress",
-                {
-                    "item_id": item["id"],
-                    "status": "downloading",
-                    "tracks_done": 0,
-                    "track_count": item["track_count"],
-                },
+    def begin_shutdown(self) -> None:
+        """Synchronously close admission before the shutdown coroutine yields."""
+        self._stopping = True
+
+    @staticmethod
+    def _log_shutdown_error(operation: str, error: BaseException) -> None:
+        logger.error(
+            "Download shutdown could not finish %s",
+            operation,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    async def _drain_shutdown(self) -> None:
+        errors: list[tuple[str, BaseException]] = []
+        try:
+            errors.extend(self._settle_pending_for_shutdown())
+        except Exception as error:
+            errors.append(("pending queue settlement", error))
+        worker = self._worker_task
+        if worker is not None and not worker.done():
+            active = next(
+                (item for item in self._queue if item["status"] == "downloading"),
+                None,
+            )
+            if active is not None:
+                logger.info(
+                    "Shutdown waiting for current album download to finish: %s",
+                    active["title"],
+                )
+        if worker is not None:
+            results = await asyncio.gather(worker, return_exceptions=True)
+            errors.extend(
+                ("download worker", result)
+                for result in results
+                if isinstance(result, BaseException)
+            )
+        if worker is not None and worker.done() and self._worker_task is worker:
+            self._worker_task = None
+
+        while self._progress_tasks:
+            tasks = tuple(self._progress_tasks)
+            logger.info(
+                "Shutdown waiting for %d download progress event task(s)", len(tasks)
+            )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            self._progress_tasks.difference_update(tasks)
+            errors.extend(
+                ("download progress event", result)
+                for result in results
+                if isinstance(result, BaseException)
             )
 
-            try:
-                await self._download_album(item)
+        for operation, error in errors:
+            self._log_shutdown_error(operation, error)
 
-                # Re-check cancellation: the user may have cancelled while
-                # _download_album was running. The SDK doesn't support mid-
-                # flight interruption, but we can at least avoid marking the
-                # item as "complete" — treat it as cancelled so the UI shows
-                # the correct state and the album status reverts.
+    async def shutdown(self) -> None:
+        """Stop admission and drain every owned task despite caller cancellation."""
+        self.begin_shutdown()
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._drain_shutdown())
+        await await_task_completion(
+            self._shutdown_task,
+            operation="download service shutdown",
+        )
+
+    async def _process_queue(self):
+        try:
+            while True:
+                if self._stopping:
+                    break
+                pending = [item for item in self._queue if item["status"] == "pending"]
+                if not pending:
+                    break
+                item = pending[0]
                 if item["id"] in self._cancel_requested:
-                    self._cancel_requested.discard(item["id"])
                     item["status"] = "cancelled"
-                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
-                    logger.info(
-                        "Download of %s cancelled after completion", item["title"]
-                    )
-                else:
-                    item["status"] = "complete"
-                    # Record the folder the SDK wrote to alongside the status:
-                    # without it ``unmark_album_downloaded`` has no path and
-                    # leaves the SDK's .streamrip.json sentinel behind, which
-                    # hides the folder from every later scan.
-                    # ``set_album_download_state`` COALESCEs the path, so a
-                    # None keeps whatever a previous scan recorded.
-                    self.db.set_album_download_state(
+                    self._cancel_requested.discard(item["id"])
+                    self._prune_queue()
+                    continue
+
+                item["status"] = "downloading"
+                self.db.update_album_status(item["album_db_id"], "downloading")
+                await self.event_bus.publish(
+                    "download_progress",
+                    {
+                        "item_id": item["id"],
+                        "status": "downloading",
+                        "tracks_done": 0,
+                        "track_count": item["track_count"],
+                    },
+                )
+
+                try:
+                    await self._download_album(item)
+
+                    # Re-check cancellation: the user may have cancelled while
+                    # _download_album was running. The SDK doesn't support mid-
+                    # flight interruption, but we can at least avoid marking the
+                    # item as "complete" — treat it as cancelled so the UI shows
+                    # the correct state and the album status reverts.
+                    if item["id"] in self._cancel_requested:
+                        self._cancel_requested.discard(item["id"])
+                        item["status"] = "cancelled"
+                        self.db.update_album_status(
+                            item["album_db_id"], "not_downloaded"
+                        )
+                        logger.info(
+                            "Download of %s cancelled after completion", item["title"]
+                        )
+                    else:
+                        item["status"] = "complete"
+                        # Record the folder the SDK wrote to alongside the status:
+                        # without it ``unmark_album_downloaded`` has no path and
+                        # leaves the SDK's .streamrip.json sentinel behind, which
+                        # hides the folder from every later scan.
+                        # ``set_album_download_state`` COALESCEs the path, so a
+                        # None keeps whatever a previous scan recorded.
+                        self.db.set_album_download_state(
+                            item["album_db_id"],
+                            downloaded_at=datetime.now().isoformat(),
+                            local_folder_path=item.get("local_folder_path"),
+                        )
+                        await self.event_bus.publish(
+                            "download_complete",
+                            {
+                                "item_id": item["id"],
+                                "title": item["title"],
+                                "artist": item["artist"],
+                            },
+                        )
+                except Exception as e:
+                    logger.exception("Download failed for %s", item["title"])
+                    item["status"] = "failed"
+                    # Persist the failure (with a timestamp, which is what
+                    # get_recent_downloads filters on) so the download history
+                    # still shows it after a restart. "failed" is not terminal:
+                    # enqueue looks albums up by source id, never by status, so
+                    # the album stays re-queueable.
+                    self.db.update_album_status(
                         item["album_db_id"],
+                        "failed",
                         downloaded_at=datetime.now().isoformat(),
-                        local_folder_path=item.get("local_folder_path"),
                     )
                     await self.event_bus.publish(
-                        "download_complete",
-                        {
-                            "item_id": item["id"],
-                            "title": item["title"],
-                            "artist": item["artist"],
-                        },
+                        "download_failed", {"item_id": item["id"], "error": str(e)}
                     )
-            except Exception as e:
-                logger.exception("Download failed for %s", item["title"])
-                item["status"] = "failed"
-                # Persist the failure (with a timestamp, which is what
-                # get_recent_downloads filters on) so the download history
-                # still shows it after a restart. "failed" is not terminal:
-                # enqueue looks albums up by source id, never by status, so
-                # the album stays re-queueable.
-                self.db.update_album_status(
-                    item["album_db_id"],
-                    "failed",
-                    downloaded_at=datetime.now().isoformat(),
-                )
-                await self.event_bus.publish(
-                    "download_failed", {"item_id": item["id"], "error": str(e)}
-                )
-            finally:
-                # The item is terminal either way: drop any cancel request
-                # still pending against it (nothing else ever removes IDs for
-                # items that finished before the request landed) and keep the
-                # queue bounded.
-                self._cancel_requested.discard(item["id"])
-                self._prune_queue()
+                finally:
+                    # The item is terminal either way: drop any cancel request
+                    # still pending against it (nothing else ever removes IDs for
+                    # items that finished before the request landed) and keep the
+                    # queue bounded.
+                    self._cancel_requested.discard(item["id"])
+                    self._prune_queue()
+        finally:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if self._worker_task is current:
+                self._worker_task = None
 
     def _build_dl_config_kwargs(
         self,
@@ -519,9 +637,9 @@ class DownloadService:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # Fire-and-forget progress emit from an SDK sync callback;
-                    # no handle needed — any error is swallowed by the except below.
-                    loop.create_task(  # noqa: RUF006
+                    # SDK callbacks are synchronous, so publish in an owned task.
+                    # Shutdown drains these before client transports are closed.
+                    task = loop.create_task(
                         event_bus.publish(
                             "download_progress",
                             {
@@ -537,6 +655,8 @@ class DownloadService:
                             },
                         )
                     )
+                    self._progress_tasks.add(task)
+                    task.add_done_callback(self._progress_tasks.discard)
             except Exception:
                 pass
 
