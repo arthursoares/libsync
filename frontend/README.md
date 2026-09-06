@@ -40,6 +40,20 @@ Typical split setup:
 
 The Vite dev server is for frontend iteration only. Production builds are emitted to `frontend/build` and copied into `backend/static/` by the root `Makefile`.
 
+Vite proxies `/api` HTTP requests and `/api/ws` WebSocket connections to
+`http://localhost:8080`, keeping the original path. Production clients remain
+same-origin; this proxy only applies to the development server.
+
+To verify the split setup without starting a sync or download:
+
+1. Open the Vite URL printed in the terminal (normally `http://localhost:5173`).
+2. In browser Network tools, check that `/api/auth/status` returns the backend
+   response through the Vite origin.
+3. In the WebSocket filter, check that `/api/ws` upgrades with status 101 and
+   receives backend events. Keep the connection open to check ongoing traffic.
+4. Stop the backend and confirm API requests fail rather than returning the app
+   HTML; restart it and reload to confirm HTTP and WebSocket recovery.
+
 ## Structure
 
 ```text
