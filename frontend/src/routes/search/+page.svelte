@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
-  import { currentSource, selectedAlbum, loadAlbumDetail } from '$lib/stores/library';
+  import { currentSource, selectedAlbum, selectAlbum, loadAlbumDetail, clearAlbumDetail } from '$lib/stores/library';
   import { api } from '$lib/api/client';
   import { enqueueDownloads } from '$lib/stores/downloads';
 
@@ -36,6 +36,7 @@
   let selectMode = $state(false);
   let selectedAlbums = $state<Set<string>>(new Set());
   let batchDownloading = $state(false);
+  let batchRequest = 0;
 
   function toggleSelectMode() {
     selectMode = !selectMode;
@@ -54,7 +55,8 @@
   }
 
   async function downloadSelected() {
-    if (selectedAlbums.size === 0) return;
+    if (selectedAlbums.size === 0 || batchDownloading) return;
+    const request = ++batchRequest;
     batchDownloading = true;
     try {
       // Search results already carry the full metadata — pass it through
@@ -71,10 +73,11 @@
           release_date: r.release_date ?? null,
         }));
       await enqueueDownloads(source, [...selectedAlbums], { albums });
+      if (request !== batchRequest) return;
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
-      batchDownloading = false;
+      if (request === batchRequest) batchDownloading = false;
     }
   }
 
@@ -157,18 +160,35 @@
 
   // ── Album detail ──
   async function handleSelectAlbum(album: any) {
-    $selectedAlbum = album;
+    if (album.source && album.source !== source) return;
+    selectAlbum({ ...album, source: album.source ?? source });
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {
-        await loadAlbumDetail(source, album.id);
+        await loadAlbumDetail(album.source ?? source, album.id);
       } catch { /* search result may not be in DB */ }
     }
   }
 
   function closeDetail() {
     detailOpen = false;
+    clearAlbumDetail();
   }
+
+  $effect(() => {
+    source;
+    untrack(() => {
+      selectedAlbums = new Set();
+      selectMode = false;
+      batchRequest++;
+      batchDownloading = false;
+      closeDetail();
+      results = [];
+      total = 0;
+    });
+  });
+
+  onDestroy(clearAlbumDetail);
 
   // Re-run search when source changes (if there's an active query)
   $effect(() => {

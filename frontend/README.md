@@ -82,3 +82,10 @@ and retry to confirm saved values appear before Save becomes available. Do not s
 against a real configuration just to test this failure path.
 
 There is currently no browser e2e harness wired into the frontend package.
+
+For a manual source-switch check in both Library and Search, select an album in
+multi-select mode, switch service, and confirm the batch bar and selection mode
+clear. Open a detail panel, delay its response in Network tools, switch service,
+and confirm the panel closes and does not return when the old response arrives.
+Use mocked download requests when checking the queued service/catalog-ID pair;
+detail GETs intentionally use the local database ID instead of the catalog ID.
