@@ -13,6 +13,11 @@ from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
 from ..services.download import _parse_bool
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
+from ..services.tracks import (
+    TrackClientUnavailableError,
+    TrackIdentityError,
+    resolve_album_track_ids,
+)
 
 logger = logging.getLogger("streamrip")
 
@@ -23,6 +28,8 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 # endpoint reads it, so a small rolling window is enough — without a cap it
 # grows for the life of the process.
 MAX_FINISHED_SCAN_JOBS = 20
+TRACK_CLIENT_UNAVAILABLE_MESSAGE = "Connect the album source and retry."
+TRACK_IDENTITY_ERROR_MESSAGE = "Could not load a complete track catalog. Retry later."
 
 
 def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
@@ -55,6 +62,15 @@ def _resolve_downloads_root(db) -> str:
         or os.environ.get("STREAMRIP_DOWNLOADS_PATH")
         or "/music"
     )
+
+
+def _track_identity_error(error: TrackIdentityError) -> JSONResponse:
+    message = (
+        TRACK_CLIENT_UNAVAILABLE_MESSAGE
+        if isinstance(error, TrackClientUnavailableError)
+        else TRACK_IDENTITY_ERROR_MESSAGE
+    )
+    return JSONResponse({"error": message}, status_code=error.status_code)
 
 
 def _validate_local_folder_path(
@@ -140,11 +156,20 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
     if err is not None:
         return err
 
-    mark_album_downloaded(
+    try:
+        track_ids = await resolve_album_track_ids(
+            db, request.app.state._clients_ref, album_id
+        )
+    except TrackIdentityError as error:
+        return _track_identity_error(error)
+
+    await asyncio.to_thread(
+        mark_album_downloaded,
         db,
         album_id,
         local_folder_path=resolved_path,
         dedup_db_dir=_dedup_db_dir(),
+        track_ids=track_ids,
         sentinel_write_enabled=sentinel_enabled,
     )
     await request.app.state.event_bus.publish(
@@ -160,10 +185,19 @@ async def unmark_downloaded(request: Request, album_id: int):
     if db.get_album(album_id) is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
-    unmark_album_downloaded(
+    try:
+        track_ids = await resolve_album_track_ids(
+            db, request.app.state._clients_ref, album_id
+        )
+    except TrackIdentityError as error:
+        return _track_identity_error(error)
+
+    await asyncio.to_thread(
+        unmark_album_downloaded,
         db,
         album_id,
         dedup_db_dir=_dedup_db_dir(),
+        track_ids=track_ids,
     )
     await request.app.state.event_bus.publish(
         "album_status_changed",
@@ -221,6 +255,7 @@ async def start_scan(request: Request):
         try:
             result = await scan_service.run_scan(
                 db,
+                clients=app.state._clients_ref,
                 download_path=download_path,
                 dedup_db_dir=_dedup_db_dir(),
                 event_bus=tracked_bus,

@@ -298,7 +298,7 @@ class TestLibrarySDKTracks:
             MockTrack(id=102, title="Track 2", track_number=2),
         ]
         client = make_sdk_client(
-            albums=[MockAlbum(id="a1")],
+            albums=[MockAlbum(id="a1", tracks_count=2)],
             tracks=tracks,
         )
         service = LibraryService(db, event_bus, clients={"qobuz": client})

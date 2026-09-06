@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -121,12 +122,48 @@ def _make_item(db, source: str, source_album_id: str, force: bool) -> dict:
     }
 
 
+def _catalog_client(source: str):
+    client = MagicMock()
+    if source == "qobuz":
+        album = SimpleNamespace(tracks_count=4)
+        tracks = [
+            SimpleNamespace(
+                id=i,
+                title=f"T{i}",
+                performer=SimpleNamespace(name="A"),
+                track_number=i + 1,
+                disc_number=1,
+                duration=180,
+                explicit=False,
+                isrc=None,
+            )
+            for i in range(4)
+        ]
+    else:
+        album = SimpleNamespace(number_of_tracks=4)
+        tracks = [
+            SimpleNamespace(
+                id=i,
+                title=f"T{i}",
+                artist=SimpleNamespace(name="A"),
+                artists=[],
+                track_number=i + 1,
+                volume_number=1,
+                duration=180,
+                explicit=False,
+                isrc=None,
+            )
+            for i in range(4)
+        ]
+    client.catalog.get_album_with_tracks = AsyncMock(return_value=(album, tracks))
+    return client
+
+
 class TestForceBypassesDedup:
     """DownloadConfig: skip_downloaded + downloads_db_path."""
 
     async def test_force_true_disables_skip_downloaded(self, db, event_bus):
-        client = MagicMock()
-        client.catalog = MagicMock()
+        client = _catalog_client("qobuz")
         service = DownloadService(
             db, event_bus, clients={"qobuz": client}, download_path="/tmp"
         )
@@ -142,8 +179,7 @@ class TestForceBypassesDedup:
         )
 
     async def test_force_true_clears_downloads_db_path(self, db, event_bus):
-        client = MagicMock()
-        client.catalog = MagicMock()
+        client = _catalog_client("qobuz")
         service = DownloadService(
             db, event_bus, clients={"qobuz": client}, download_path="/tmp"
         )
@@ -160,8 +196,7 @@ class TestForceBypassesDedup:
         )
 
     async def test_force_false_uses_normal_dedup_path(self, db, event_bus):
-        client = MagicMock()
-        client.catalog = MagicMock()
+        client = _catalog_client("qobuz")
         service = DownloadService(
             db, event_bus, clients={"qobuz": client}, download_path="/tmp"
         )
@@ -182,8 +217,7 @@ class TestForceBypassesDedup:
     async def test_force_false_tidal_uses_separate_dedup_db(self, db, event_bus):
         """Per-source dedup DB filename: Tidal uses downloads-tidal.db
         instead of downloads.db so the two services' track IDs can't collide."""
-        client = MagicMock()
-        client.catalog = MagicMock()
+        client = _catalog_client("tidal")
         # Use a fresh download path to avoid env path interference
         service = DownloadService(
             db, event_bus, clients={"tidal": client}, download_path="/tmp"

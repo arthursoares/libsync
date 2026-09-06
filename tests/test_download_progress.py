@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -125,6 +126,22 @@ def _item(db, source_album_id: str) -> dict:
 def _service(db, event_bus):
     client = MagicMock()
     client.catalog = MagicMock()
+    tracks = [
+        SimpleNamespace(
+            id=i,
+            title=f"Track {i}",
+            performer=SimpleNamespace(name="Test Artist"),
+            track_number=i + 1,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        for i in range(2)
+    ]
+    client.catalog.get_album_with_tracks = AsyncMock(
+        return_value=(SimpleNamespace(tracks_count=2), tracks)
+    )
     return DownloadService(
         db, event_bus, clients={"qobuz": client}, download_path="/tmp"
     )

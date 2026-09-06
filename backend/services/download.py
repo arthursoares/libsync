@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
 
@@ -460,6 +461,11 @@ class DownloadService:
         else:
             raise ValueError(f"Unsupported source: {source}")
 
+        catalog_track_ids = await resolve_album_track_ids(
+            self.db, self.clients, item["album_db_id"]
+        )
+        item["track_count"] = len(catalog_track_ids)
+
         # Quality is per-source (each streaming service has its own tier scale).
         quality_key = f"{source}_quality"
         quality = 3
@@ -603,7 +609,6 @@ class DownloadService:
 
         result = await downloader.download(item["source_album_id"])
 
-        item["track_count"] = result.total
         item["tracks_done"] = result.successful
         item["local_folder_path"] = _album_folder_from_result(result)
 
@@ -617,7 +622,7 @@ class DownloadService:
                 item["album_db_id"],
                 title=result.title,
                 artist=result.artist,
-                track_count=result.total,
+                track_count=len(catalog_track_ids),
             )
             item["title"] = result.title
             item["artist"] = result.artist

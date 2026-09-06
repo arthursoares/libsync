@@ -20,6 +20,8 @@ from pathlib import Path
 
 import mutagen
 
+from .tracks import resolve_album_track_ids
+
 logger = logging.getLogger("streamrip")
 
 _PAREN_SUFFIX_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]\s*$")
@@ -395,6 +397,7 @@ def mark_album_downloaded(
     *,
     local_folder_path: str | None,
     dedup_db_dir: str,
+    track_ids: tuple[str, ...],
     sentinel_write_enabled: bool = True,
     now: datetime | None = None,
 ) -> None:
@@ -406,6 +409,8 @@ def mark_album_downloaded(
     album = db.get_album(album_id)
     if album is None:
         raise ValueError(f"Album {album_id} not found")
+    if not track_ids:
+        raise ValueError("A complete non-empty track identity set is required")
 
     downloaded_at = (now or datetime.now()).isoformat()
     db.set_album_download_state(
@@ -414,9 +419,7 @@ def mark_album_downloaded(
         local_folder_path=local_folder_path,
     )
 
-    track_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
-    if track_ids:
-        _populate_dedup(track_ids, album["source"], dedup_db_dir)
+    _populate_dedup(list(track_ids), album["source"], dedup_db_dir)
 
     if local_folder_path and sentinel_write_enabled:
         _write_sentinel(
@@ -430,17 +433,21 @@ def unmark_album_downloaded(
     album_id: int,
     *,
     dedup_db_dir: str,
+    track_ids: tuple[str, ...],
 ) -> None:
     album = db.get_album(album_id)
     if album is None:
         raise ValueError(f"Album {album_id} not found")
+    if not track_ids:
+        raise ValueError("A complete non-empty track identity set is required")
+
+    historical_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
+    all_track_ids = list(dict.fromkeys((*track_ids, *historical_ids)))
 
     folder = album.get("local_folder_path")
     _remove_sentinel(folder)
 
-    track_ids = [t["source_track_id"] for t in db.get_tracks(album_id)]
-    if track_ids:
-        _remove_from_dedup(track_ids, album["source"], dedup_db_dir)
+    _remove_from_dedup(all_track_ids, album["source"], dedup_db_dir)
 
     db.clear_album_download_state(album_id)
 
@@ -505,6 +512,7 @@ def _inspect_folder(folder: Path) -> tuple[bool, FolderMeta | None]:
 async def run_scan(
     db,
     *,
+    clients: dict,
     download_path: str,
     dedup_db_dir: str,
     event_bus,
@@ -559,12 +567,46 @@ async def run_scan(
             # mid-scan) must not unwind the whole job and discard every
             # album marked so far — record it and keep going.
             try:
+                album_id = result.album_id
+                if album_id is None:
+                    raise ValueError("Auto-match did not include an album ID")
+                track_ids = await resolve_album_track_ids(db, clients, album_id)
+                if meta.track_count != len(track_ids):
+                    album = db.get_album(album_id)
+                    if album is None:
+                        raise ValueError(f"Album {album_id} not found")
+                    review.append(
+                        {
+                            "folder": str(folder),
+                            "local_bit_depth": meta.bit_depth,
+                            "local_sample_rate": meta.sample_rate,
+                            "candidates": [
+                                {
+                                    "album_id": album_id,
+                                    "source": album["source"],
+                                    "artist": album["artist"],
+                                    "title": album["title"],
+                                    "score": 0.9,
+                                    "reason": (
+                                        "track_count_mismatch: "
+                                        f"local={meta.track_count} "
+                                        f"library={len(track_ids)}"
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    await event_bus.publish(
+                        "scan_progress", {"scanned": i, "total": total}
+                    )
+                    continue
                 await asyncio.to_thread(
                     mark_album_downloaded,
                     db,
-                    result.album_id,
+                    album_id,
                     local_folder_path=str(folder),
                     dedup_db_dir=dedup_db_dir,
+                    track_ids=track_ids,
                     sentinel_write_enabled=sentinel_write_enabled,
                 )
             except Exception as e:

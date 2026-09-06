@@ -574,6 +574,53 @@ class AppDatabase:
             ).fetchone()
             return row["id"]
 
+    def cache_album_tracks(
+        self,
+        album_id: int,
+        tracks: list[dict],
+        *,
+        authoritative_count: int,
+    ) -> None:
+        """Cache a complete catalog response and its count in one transaction.
+
+        Existing rows are retained so historical identities remain available
+        for unmark reconciliation. Conflict updates touch catalog metadata only;
+        download status and local file metadata are deliberately preserved.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE albums SET track_count = ? WHERE id = ?",
+                (authoritative_count, album_id),
+            )
+            conn.executemany(
+                """INSERT INTO tracks
+                   (album_id, source_track_id, title, artist, track_number,
+                    disc_number, duration_seconds, explicit, isrc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(album_id, source_track_id)
+                   DO UPDATE SET
+                     title=excluded.title, artist=excluded.artist,
+                     track_number=excluded.track_number,
+                     disc_number=excluded.disc_number,
+                     duration_seconds=excluded.duration_seconds,
+                     explicit=excluded.explicit, isrc=excluded.isrc
+                """,
+                [
+                    (
+                        album_id,
+                        track["source_track_id"],
+                        track["title"],
+                        track["artist"],
+                        track.get("track_number"),
+                        track.get("disc_number", 1),
+                        track.get("duration_seconds"),
+                        track.get("explicit", False),
+                        track.get("isrc"),
+                    )
+                    for track in tracks
+                ],
+            )
+
     def get_tracks(self, album_id: int) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(

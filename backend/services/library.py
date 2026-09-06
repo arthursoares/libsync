@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
 
@@ -47,113 +48,20 @@ class LibraryService:
 
         # If no tracks cached, fetch from API
         if not tracks:
-            source = album["source"]
-            client = self.clients.get(source)
-            if client is not None and hasattr(client, "catalog"):
-                try:
-                    tracks = await self._fetch_and_cache_tracks(
-                        client, source, album["source_album_id"], album_id
-                    )
-                except Exception:
-                    logger.exception("Failed to fetch tracks for album %s", album_id)
+            try:
+                current_ids = set(
+                    await resolve_album_track_ids(self.db, self.clients, album_id)
+                )
+                tracks = [
+                    track
+                    for track in self.db.get_tracks(album_id)
+                    if track["source_track_id"] in current_ids
+                ]
+                album = self.db.get_album(album_id) or album
+            except Exception:
+                logger.exception("Failed to fetch tracks for album %s", album_id)
 
         return {**album, "tracks": tracks}
-
-    async def _fetch_and_cache_tracks(self, client, source, source_album_id, album_id):
-        """Fetch track list from API and cache in DB."""
-        if source == "qobuz":
-            if hasattr(client, "catalog"):
-                return await self._fetch_qobuz_tracks_sdk(
-                    client, source_album_id, album_id
-                )
-            return await self._fetch_qobuz_tracks(client, source_album_id, album_id)
-        elif source == "tidal":
-            return await self._fetch_tidal_tracks(client, source_album_id, album_id)
-        return []
-
-    async def _fetch_qobuz_tracks_sdk(self, client, source_album_id, album_id):
-        """Fetch tracks from Qobuz using SDK client."""
-        try:
-            _album, tracks = await client.catalog.get_album_with_tracks(source_album_id)
-        except Exception:
-            logger.exception("Failed to fetch Qobuz album %s via SDK", source_album_id)
-            return []
-
-        for t in tracks:
-            self.db.upsert_track(
-                album_id=album_id,
-                source_track_id=str(t.id),
-                title=t.title,
-                artist=t.performer.name,
-                track_number=t.track_number,
-                disc_number=t.disc_number,
-                duration_seconds=t.duration,
-                explicit=t.explicit,
-                isrc=t.isrc,
-            )
-
-        return self.db.get_tracks(album_id)
-
-    async def _fetch_qobuz_tracks(self, client, source_album_id, album_id):
-        """Fetch tracks from Qobuz album/get endpoint (streamrip client)."""
-        try:
-            resp = await client.get_album(source_album_id)
-        except Exception:
-            logger.exception("Failed to fetch Qobuz album %s", source_album_id)
-            return []
-
-        track_items = resp.get("tracks", {}).get("items", [])
-        for t in track_items:
-            artist = t.get("performer", {})
-            artist_name = (
-                artist.get("name", "Unknown")
-                if isinstance(artist, dict)
-                else (str(artist) if artist else "Unknown")
-            )
-
-            self.db.upsert_track(
-                album_id=album_id,
-                source_track_id=str(t["id"]),
-                title=t.get("title", "Unknown"),
-                artist=artist_name,
-                track_number=t.get("track_number"),
-                disc_number=t.get("media_number", 1),
-                duration_seconds=t.get("duration"),
-                explicit=t.get("parental_warning", False),
-                isrc=t.get("isrc"),
-            )
-
-        return self.db.get_tracks(album_id)
-
-    async def _fetch_tidal_tracks(self, client, source_album_id, album_id):
-        """Fetch tracks from Tidal using the SDK catalog API."""
-        try:
-            _, tracks = await client.catalog.get_album_with_tracks(source_album_id)
-        except Exception:
-            logger.exception("Failed to fetch Tidal album %s via SDK", source_album_id)
-            return []
-
-        for t in tracks:
-            # Prefer the primary artist's name, fall back to joined artists
-            # list for compilations / collaborations.
-            artist_name = (
-                t.artist.name
-                if t.artist.name
-                else (", ".join(a.name for a in t.artists) if t.artists else "Unknown")
-            )
-            self.db.upsert_track(
-                album_id=album_id,
-                source_track_id=str(t.id),
-                title=t.title,
-                artist=artist_name,
-                track_number=t.track_number,
-                disc_number=t.volume_number,
-                duration_seconds=t.duration,
-                explicit=t.explicit,
-                isrc=t.isrc,
-            )
-
-        return self.db.get_tracks(album_id)
 
     async def refresh_library(self, source):
         client = self.clients.get(source)

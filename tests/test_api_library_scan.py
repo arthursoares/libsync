@@ -1,6 +1,9 @@
 """API tests for /scan-fuzzy, /mark-downloaded, /unmark-downloaded."""
 
 import asyncio
+import sqlite3
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -19,6 +22,35 @@ async def client(app):
         transport=ASGITransport(app=app), base_url="http://test"
     ) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def isolated_dedup_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("STREAMRIP_DB_PATH", str(tmp_path / "libsync.db"))
+
+
+@pytest.fixture(autouse=True)
+def catalog_client(app):
+    tracks = [
+        SimpleNamespace(
+            id=f"t{i}",
+            title=f"Track {i}",
+            performer=SimpleNamespace(name="The Beatles"),
+            track_number=i,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        for i in range(1, 18)
+    ]
+    client = MagicMock()
+    client.catalog.get_album_with_tracks = AsyncMock(
+        return_value=(SimpleNamespace(tracks_count=17), tracks)
+    )
+    app.state._clients_ref["qobuz"] = client
+    app.state.library_service.clients["qobuz"] = client
+    return client
 
 
 @pytest.fixture
@@ -130,6 +162,203 @@ class TestMarkDownloaded:
         assert resp.status_code == 200
         sentinel = downloads_root / "Album" / ".streamrip.json"
         assert sentinel.exists()
+
+    async def test_missing_client_fails_closed_without_event_or_state_change(
+        self, client, app, album_id
+    ):
+        app.state._clients_ref.clear()
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded", json={}
+        )
+
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "Connect the album source and retry."
+        assert app.state.db.get_album(album_id)["download_status"] == "not_downloaded"
+        assert events == []
+
+    @pytest.mark.parametrize(
+        ("action", "initial_status"),
+        [
+            ("mark-downloaded", "not_downloaded"),
+            ("unmark-downloaded", "complete"),
+        ],
+    )
+    async def test_catalog_sdk_errors_are_sanitized_without_mutation_or_event(
+        self,
+        client,
+        app,
+        album_id,
+        catalog_client,
+        action,
+        initial_status,
+    ):
+        marker = "sdk-internal-marker /private/credentials.json"
+        if initial_status == "complete":
+            app.state.db.set_album_download_state(
+                album_id, downloaded_at="2026-09-06T00:00:00"
+            )
+        before = dict(app.state.db.get_album(album_id))
+        catalog_client.catalog.get_album_with_tracks.side_effect = RuntimeError(marker)
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        response = await client.post(
+            f"/api/library/albums/{album_id}/{action}",
+            json={} if action == "mark-downloaded" else None,
+        )
+
+        assert response.status_code == 502
+        assert response.json()["error"] == (
+            "Could not load a complete track catalog. Retry later."
+        )
+        assert marker not in response.text
+        assert dict(app.state.db.get_album(album_id)) == before
+        assert events == []
+
+    @pytest.mark.parametrize(
+        ("catalog_result", "catalog_error", "message"),
+        [
+            (
+                (SimpleNamespace(tracks_count=2), [SimpleNamespace(id="only-one")]),
+                None,
+                "incomplete",
+            ),
+            ((SimpleNamespace(tracks_count=0), []), None, "empty authoritative"),
+            (
+                (
+                    SimpleNamespace(tracks_count=2),
+                    [SimpleNamespace(id="same"), SimpleNamespace(id="same")],
+                ),
+                None,
+                "duplicate",
+            ),
+            (
+                (SimpleNamespace(tracks_count=1), [SimpleNamespace(id=None)]),
+                None,
+                "without an identity",
+            ),
+            (None, OSError("catalog offline"), "catalog offline"),
+        ],
+    )
+    async def test_catalog_failure_fails_closed_without_any_success_mutation(
+        self,
+        client,
+        app,
+        album_id,
+        catalog_client,
+        tmp_path,
+        catalog_result,
+        catalog_error,
+        message,
+    ):
+        folder = tmp_path / "music" / "Album"
+        folder.mkdir(parents=True)
+        app.state.db.set_config("downloads_path", str(tmp_path / "music"))
+        catalog_client.catalog.get_album_with_tracks.return_value = catalog_result
+        catalog_client.catalog.get_album_with_tracks.side_effect = catalog_error
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        resp = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded",
+            json={"local_folder_path": str(folder)},
+        )
+
+        assert resp.status_code == 502
+        assert resp.json()["error"] == (
+            "Could not load a complete track catalog. Retry later."
+        )
+        assert message not in resp.text
+        assert app.state.db.get_album(album_id)["download_status"] == "not_downloaded"
+        assert not (folder / ".streamrip.json").exists()
+        assert not (tmp_path / "downloads.db").exists()
+        assert events == []
+
+    async def test_downloaded_without_detail_unmark_removes_all_catalog_ids(
+        self, client, app, album_id, tmp_path
+    ):
+        app.state.db.set_album_download_state(
+            album_id, downloaded_at="2026-09-05T00:00:00"
+        )
+        dedup_path = tmp_path / "downloads.db"
+        conn = sqlite3.connect(dedup_path)
+        try:
+            conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+            conn.executemany(
+                "INSERT INTO downloads (id) VALUES (?)",
+                [(f"t{i}",) for i in range(1, 18)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert len(app.state.db.get_tracks(album_id)) == 1
+
+        resp = await client.post(f"/api/library/albums/{album_id}/unmark-downloaded")
+
+        assert resp.status_code == 200
+        assert resp.json()["download_status"] == "not_downloaded"
+        conn = sqlite3.connect(dedup_path)
+        try:
+            assert conn.execute("SELECT id FROM downloads").fetchall() == []
+        finally:
+            conn.close()
+
+    async def test_unmark_offline_leaves_state_sentinel_dedup_and_events_untouched(
+        self, client, app, album_id, catalog_client, tmp_path
+    ):
+        folder = tmp_path / "music" / "Album"
+        folder.mkdir(parents=True)
+        sentinel = folder / ".streamrip.json"
+        sentinel.write_text("{}")
+        app.state.db.set_album_download_state(
+            album_id,
+            downloaded_at="2026-09-05T00:00:00",
+            local_folder_path=str(folder),
+        )
+        dedup_path = tmp_path / "downloads.db"
+        conn = sqlite3.connect(dedup_path)
+        try:
+            conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO downloads (id) VALUES ('t1')")
+            conn.commit()
+        finally:
+            conn.close()
+        catalog_client.catalog.get_album_with_tracks.side_effect = OSError("offline")
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        resp = await client.post(f"/api/library/albums/{album_id}/unmark-downloaded")
+
+        assert resp.status_code == 502
+        album = app.state.db.get_album(album_id)
+        assert album["download_status"] == "complete"
+        assert album["local_folder_path"] == str(folder)
+        assert sentinel.exists()
+        conn = sqlite3.connect(dedup_path)
+        try:
+            assert conn.execute("SELECT id FROM downloads").fetchall() == [("t1",)]
+        finally:
+            conn.close()
+        assert events == []
 
 
 class TestScanFuzzy:
