@@ -27,16 +27,38 @@ export const lastCompletedDownload = writable<Record<string, unknown> | null>(nu
 export const liveTrackStatuses = writable<Record<string, any[]>>({});
 
 let loadQueueDebounce: ReturnType<typeof setTimeout> | null = null;
+let queueRequest = 0;
+
+// Mutations need an immediate, awaitable read, not the background debounce.
+export async function refreshQueue() {
+  if (loadQueueDebounce) clearTimeout(loadQueueDebounce);
+  loadQueueDebounce = null;
+  const request = ++queueRequest;
+  const data = await api.downloads.getQueue();
+  if (request === queueRequest) {
+    queue.set(data.items);
+    activeCount.set(data.active_count);
+    totalSpeed.set(data.total_speed);
+  }
+  return data;
+}
+
+export async function cancelDownload(id: string) {
+  await api.downloads.cancel(id);
+  await refreshQueue();
+}
+
+export async function cancelAllDownloads() {
+  await api.downloads.cancelAll();
+  await refreshQueue();
+}
 
 export async function loadQueue() {
   // Debounce — multiple events can fire simultaneously
   if (loadQueueDebounce) clearTimeout(loadQueueDebounce);
   loadQueueDebounce = setTimeout(async () => {
     try {
-      const data = await api.downloads.getQueue();
-      queue.set(data.items);
-      activeCount.set(data.active_count);
-      totalSpeed.set(data.total_speed);
+      await refreshQueue();
     } catch {
       // ignore — API may be unavailable briefly
     }
@@ -68,7 +90,7 @@ onEvent('download_progress', (data) => {
   queue.update(items => {
     itemMissing = shouldReloadQueueForUnknownItem(items, (data as any).item_id);
     const updated = items.map(item =>
-      item.id === data.item_id ? { ...item, ...data } : item
+      item.id === data.item_id && item.status !== 'cancelled' ? { ...item, ...data } : item
     );
     // Update speed from all downloading items
     const downloading = updated.filter(i => i.status === 'downloading');
@@ -94,7 +116,7 @@ onEvent('download_progress', (data) => {
   if (Array.isArray(trackStatuses) && trackStatuses.length > 0) {
     queue.update(items => {
       const item = items.find(i => i.id === (data as any).item_id);
-      if (item?.source_album_id) {
+      if (item?.source_album_id && item.status !== 'cancelled') {
         liveTrackStatuses.update(map => ({
           ...map,
           [String(item.source_album_id)]: trackStatuses,
