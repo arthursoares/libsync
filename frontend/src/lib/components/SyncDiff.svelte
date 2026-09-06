@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+
   interface Album {
     id: string | number;
     title: string;
@@ -25,8 +27,9 @@
   // so notify the consumer here too — otherwise its selection state would
   // start empty while every row renders checked.
   $effect(() => {
-    checked = new Set(checkedIds);
-    onchange?.(checked);
+    const next = new Set(checkedIds);
+    checked = next;
+    untrack(() => onchange?.(next));
   });
 
   function toggle(id: string | number) {
