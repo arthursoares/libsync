@@ -54,17 +54,20 @@
   let source = $derived(album?.source);
 
   // Re-fetch album detail when a download completes for this album
+  let listeningForCompletions = false;
   const unsubscribeDownloadComplete = lastCompletedDownload.subscribe((completed) => {
-    if (!completed || !album || !open || !source) return;
-    if (completed.source && completed.source !== source) return;
-    const completedAlbumId = completed.album_id ?? completed.source_album_id ?? completed.item_id;
-    const currentAlbumId = album.source_album_id ?? String(album.id);
-    if (completedAlbumId && currentAlbumId && String(completedAlbumId) === String(currentAlbumId)) {
+    if (!listeningForCompletions || !completed || !album || !open || !source) return;
+    if (completed.source !== source) return;
+    const matchesAlbum = album.source_album_id
+      ? String(completed.source_album_id) === String(album.source_album_id)
+      : completed.album_db_id === album.id;
+    if (matchesAlbum) {
       if (album.id && album.id > 0) {
         loadAlbumDetail(source, album.id).catch(() => {});
       }
     }
   });
+  listeningForCompletions = true; // Do not replay an old completion when mounting a new panel.
 
   onDestroy(() => {
     unsubscribeDownloadComplete();
