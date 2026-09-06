@@ -223,6 +223,7 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
     db.set_config("tidal_user_id", str(data["user_id"]))
     db.set_config("tidal_country_code", data["country_code"])
     db.set_config("tidal_token_expiry", str(data["token_expiry"]))
+    db.set_config("tidal_auth_method", "device_code")
 
     from .config import _reload_clients
 

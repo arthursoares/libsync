@@ -16,6 +16,9 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 - **Detail refresh during status updates.** Same-album status events no longer discard pending track details or suppress mark/unmark refreshes; newer status is preserved when a pending detail response arrives.
 - **Settings load protection.** Save stays disabled until configuration loads successfully, with a visible retry action on failure and no partial form hydration during auth checks.
 - **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged.
+- **Tidal authentication transitions.** Completing device-code authentication now replaces a previously stored PKCE auth method, keeping persisted credentials and client initialization consistent.
+
+---
 
 ## v0.0.6 — 2026-04-27
 

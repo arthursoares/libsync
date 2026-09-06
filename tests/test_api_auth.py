@@ -16,7 +16,7 @@ rather than on backend.api.auth -- the local import resolves the attribute
 off that module at call time.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -24,7 +24,7 @@ from httpx import ASGITransport, AsyncClient
 from qobuz.auth import APP_ID as QOBUZ_OAUTH_APP_ID
 
 from backend.api.auth import _pkce_pending
-from backend.main import create_app
+from backend.main import _init_clients, create_app
 
 
 @pytest.fixture
@@ -346,7 +346,10 @@ class TestTidalPoll:
         assert resp.status_code == 200
         assert resp.json() == {"status": "error", "error": "network blip"}
 
-    async def test_authorized_persists_tokens(self, client, app, monkeypatch):
+    async def test_authorized_replaces_pkce_credentials_and_auth_method(
+        self, client, app, monkeypatch
+    ):
+        app.state.db.set_config("tidal_auth_method", "pkce")
         monkeypatch.setattr(
             "tidal.auth.poll_device_code",
             AsyncMock(
@@ -371,6 +374,14 @@ class TestTidalPoll:
         assert db.get_config("tidal_user_id") == "999"
         assert db.get_config("tidal_country_code") == "US"
         assert db.get_config("tidal_token_expiry") == "123456.0"
+        assert db.get_config("tidal_auth_method") == "device_code"
+
+        tidal_client = Mock(return_value=object())
+        monkeypatch.setattr("tidal.TidalClient", tidal_client)
+        initialized = _init_clients(db)
+
+        assert initialized["tidal"] is tidal_client.return_value
+        assert tidal_client.call_args.kwargs["auth_method"] == "device_code"
 
 
 class TestTidalPkce:
