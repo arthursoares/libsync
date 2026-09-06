@@ -95,9 +95,7 @@ def _download_state_error(error: Exception) -> JSONResponse:
             status_code=error.status_code,
         )
     logger.exception("Could not reconcile album download state")
-    return JSONResponse(
-        {"error": ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE}, status_code=500
-    )
+    return JSONResponse({"error": ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE}, status_code=500)
 
 
 def _validate_local_folder_path(
