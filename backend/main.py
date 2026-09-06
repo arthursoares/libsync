@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from .api import auth, config, downloads, library, sync, websocket
 from .api.websocket import manager
 from .models.database import AppDatabase
+from .services.client_activation import ClientOperationRegistry
 from .services.download import DownloadService
 from .services.event_bus import EventBus
 from .services.library import LibraryService
@@ -19,14 +21,24 @@ from .services.tasks import await_task_completion
 logger = logging.getLogger("streamrip")
 
 
-def _init_clients(db: AppDatabase) -> dict:
-    """Initialize streaming clients from stored config."""
-    clients = {}
+def _config_value(config: AppDatabase | Mapping[str, str], key: str) -> str | None:
+    if isinstance(config, Mapping):
+        return config.get(key)
+    return config.get_config(key)
 
-    # Qobuz — uses the standalone SDK client
-    qobuz_token = db.get_config("qobuz_token")
-    if qobuz_token:
-        try:
+
+def _init_client(
+    source: str,
+    config: AppDatabase | Mapping[str, str],
+    *,
+    strict: bool = False,
+):
+    """Construct one source client, optionally surfacing every failure."""
+    try:
+        if source == "qobuz":
+            qobuz_token = _config_value(config, "qobuz_token")
+            if not qobuz_token:
+                return None
             from qobuz import QobuzClient
 
             # The X-App-Id header MUST match the app that issued the
@@ -34,41 +46,38 @@ def _init_clients(db: AppDatabase) -> dict:
             # Two paths populate this:
             #   1. Web player token (manually pasted, or from streamrip
             #      CLI's email+password login): app_id is the spoofer's
-            #      bundle ID (currently 798273057) — cached in the DB by
-            #      _resolve_qobuz_credentials() on the first boot.
+            #      bundle ID (currently 798273057).
             #   2. OAuth token (qobuz/auth.py exchange_code flow): app_id
             #      is "304027809" — cached in the DB by the OAuth callback
             #      handler in backend/api/auth.py.
             # Default to the web player app_id when nothing is cached,
             # which matches the legacy behavior the SDK was designed for
             # (and is the only path where downloads work end-to-end).
-            app_id = db.get_config("qobuz_app_id") or "798273057"
+            app_id = _config_value(config, "qobuz_app_id") or "798273057"
 
             client = QobuzClient(
                 app_id=app_id,
                 user_auth_token=qobuz_token,
             )
-            clients["qobuz"] = client
             logger.info("Qobuz SDK client initialized (app_id=%s)", app_id)
-        except Exception:
-            logger.exception("Failed to initialize Qobuz client")
+            return client
 
-    # Tidal — standalone SDK (same shape as the Qobuz SDK above)
-    tidal_token = db.get_config("tidal_access_token")
-    if tidal_token:
-        try:
+        if source == "tidal":
+            tidal_token = _config_value(config, "tidal_access_token")
+            if not tidal_token:
+                return None
             from tidal import TidalClient
 
-            refresh_token = db.get_config("tidal_refresh_token")
-            user_id = db.get_config("tidal_user_id") or 0
-            country_code = db.get_config("tidal_country_code") or "US"
-            token_expiry_str = db.get_config("tidal_token_expiry") or "0"
+            refresh_token = _config_value(config, "tidal_refresh_token")
+            user_id = _config_value(config, "tidal_user_id") or 0
+            country_code = _config_value(config, "tidal_country_code") or "US"
+            token_expiry_str = _config_value(config, "tidal_token_expiry") or "0"
             try:
                 token_expiry = float(token_expiry_str)
             except ValueError:
                 token_expiry = 0.0
 
-            auth_method = db.get_config("tidal_auth_method") or "device_code"
+            auth_method = _config_value(config, "tidal_auth_method") or "device_code"
             client = TidalClient(
                 access_token=tidal_token,
                 refresh_token=refresh_token,
@@ -77,10 +86,24 @@ def _init_clients(db: AppDatabase) -> dict:
                 token_expiry=token_expiry,
                 auth_method=auth_method,
             )
-            clients["tidal"] = client
             logger.info("Tidal SDK client initialized (auth=%s)", auth_method)
-        except Exception:
-            logger.exception("Failed to initialize Tidal client")
+            return client
+
+        raise ValueError(f"Unsupported client source: {source}")
+    except Exception:
+        if strict:
+            raise
+        logger.exception("Failed to initialize %s client", source)
+        return None
+
+
+def _init_clients(db: AppDatabase) -> dict:
+    """Initialize streaming clients from stored config, best effort."""
+    clients = {}
+    for source in ("qobuz", "tidal"):
+        client = _init_client(source, db)
+        if client is not None:
+            clients[source] = client
 
     return clients
 
@@ -154,7 +177,9 @@ async def _start_auto_sync_if_enabled(
     await sync_service.start_auto_sync(source, interval_seconds, download_new=True)
 
 
-async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
+async def _resolve_qobuz_credentials(
+    config: AppDatabase | Mapping[str, str], qobuz, *, strict: bool = False
+) -> dict[str, str]:
     """Resolve a Qobuz app_secret for signing track/getFileUrl.
 
     Resolution order:
@@ -170,18 +195,17 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
 
     The X-App-Id header was set at client construction time from
     `qobuz_app_id`; this function never touches it.  If the DB has no
-    cached `qobuz_app_id` yet (first boot with a web-player token),
-    record the bundle's app_id so subsequent boots use the right
-    header from the start.  Never overwrite an existing value — the
-    OAuth callback path persists its own app_id.
+    staged `qobuz_app_id` yet, return the bundle's app_id as a derived update
+    for transactional activation. Never overwrite an existing value — the
+    OAuth callback path supplies its own token-bound app_id.
     """
     if getattr(qobuz, "_app_secret_cached", False):
-        return
+        return {}
 
     client_app_id = qobuz._transport.app_id
 
     # 1. User override
-    override_secret = db.get_config("qobuz_app_secret")
+    override_secret = _config_value(config, "qobuz_app_secret")
     if override_secret:
         qobuz.streaming._app_secret = override_secret
         qobuz._app_secret_cached = True
@@ -189,7 +213,7 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
             "Qobuz app_secret loaded from user override (app_id=%s)",
             client_app_id,
         )
-        return
+        return {}
 
     # 2. Hardcoded secret for the OAuth/Helper app
     try:
@@ -204,7 +228,7 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
                 "app_id=%s)",
                 client_app_id,
             )
-            return
+            return {}
     except ImportError:
         pass  # older SDK without APP_SECRET — fall through to spoofer
 
@@ -212,21 +236,27 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
     try:
         from qobuz.spoofer import fetch_app_credentials, find_working_secret
 
-        bundle_app_id, secrets = await fetch_app_credentials()
-        token = db.get_config("qobuz_token")
+        _bundle_app_id, secrets = await fetch_app_credentials()
+        token = _config_value(config, "qobuz_token")
         if not token or not secrets:
-            return
+            if strict:
+                raise RuntimeError("Qobuz signing credentials are unavailable")
+            return {}
 
-        if not db.get_config("qobuz_app_id"):
-            db.set_config("qobuz_app_id", bundle_app_id)
-            logger.info("Cached Qobuz app_id from bundle: %s", bundle_app_id)
-
-        client_app_id = qobuz._transport.app_id
+        derived = {}
+        if not _config_value(config, "qobuz_app_id"):
+            # The candidate was built with this app ID and signing verification
+            # below uses it. Persisting the bundle ID instead could make the DB
+            # disagree with the successfully validated live transport.
+            derived["qobuz_app_id"] = str(client_app_id)
+            logger.info("Prepared Qobuz app_id from candidate: %s", client_app_id)
 
         secret = None
         try:
             secret = await find_working_secret(client_app_id, secrets, token)
         except RuntimeError:
+            if strict:
+                raise
             logger.warning(
                 "Qobuz secret verification failed (%d candidates); "
                 "using first candidate as fallback. Set `qobuz_app_secret` "
@@ -241,9 +271,17 @@ async def _resolve_qobuz_credentials(db: AppDatabase, qobuz) -> None:
             qobuz.streaming._app_secret = secret
             qobuz._app_secret_cached = True
             logger.info("Qobuz app_secret resolved (app_id=%s)", client_app_id)
+            return derived
+
+        if strict:
+            raise RuntimeError("Qobuz signing secret could not be resolved")
+        return derived
 
     except Exception:
+        if strict:
+            raise
         logger.exception("Failed to resolve Qobuz app credentials")
+        return {}
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -287,13 +325,18 @@ def create_app(db_path: str | None = None) -> FastAPI:
         event_bus.subscribe(event_type, _handler)
 
     clients = _init_clients(db)
+    client_operations = ClientOperationRegistry()
 
     download_path = db.get_config("downloads_path") or os.environ.get(
         "STREAMRIP_DOWNLOADS_PATH", "/music"
     )
     library_service = LibraryService(db, event_bus, clients=clients)
     download_service = DownloadService(
-        db, event_bus, clients=clients, download_path=download_path
+        db,
+        event_bus,
+        clients=clients,
+        download_path=download_path,
+        client_operations=client_operations,
     )
     sync_service = SyncService(
         db,
@@ -301,11 +344,24 @@ def create_app(db_path: str | None = None) -> FastAPI:
         clients=clients,
         library_service=library_service,
         download_service=download_service,
+        client_operations=client_operations,
     )
 
     async def drain_app(app: FastAPI) -> None:
         # A broken cleanup stage must not leak unrelated owned tasks or
         # current client sessions, nor replace an exception from `yield`.
+        activation_tasks = tuple(
+            task
+            for task in client_operations.activation_tasks
+            if task is not asyncio.current_task() and not task.done()
+        )
+        if activation_tasks:
+            logger.info(
+                "Shutdown waiting for %d client activation task(s)",
+                len(activation_tasks),
+            )
+            await asyncio.gather(*activation_tasks, return_exceptions=True)
+
         for name, shutdown in (
             ("sync service", sync_service.shutdown),
             ("download service", download_service.shutdown),
@@ -336,6 +392,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 logger.exception("Closing %s client was unexpectedly cancelled", name)
             except Exception:
                 logger.exception("Failed to close %s client", name)
+        for name, client in tuple(client_operations.retirement_failures):
+            try:
+                await client.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("Failed to close retained retired %s client", name)
         logger.info("streamrip web UI shutting down")
 
     @asynccontextmanager
@@ -362,6 +423,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         finally:
             # Flip admission and producer flags synchronously before any await.
             app.state.shutting_down = True
+            client_operations.begin_shutdown()
             app.state.scan_stop_event.set()
             sync_service.begin_shutdown()
             download_service.begin_shutdown()
@@ -380,6 +442,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.download_service = download_service
     app.state.sync_service = sync_service
     app.state._clients_ref = clients
+    app.state.client_operations = client_operations
     app.state.shutting_down = False
     app.state.scan_jobs = {}  # job_id → {"status": ..., "result": ...}
     app.state.scan_tasks = set()

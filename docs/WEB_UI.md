@@ -66,6 +66,12 @@ Key points:
 
 The Tidal SDK auto-refreshes any token that expires within 24 hours on `__aenter__` and has a 401 retry path on the HTTP transport, so once credentials are in the DB you shouldn't need to touch them again unless the refresh token itself expires.
 
+### Credential activation
+
+Credential writes are transactional. Libsync constructs and opens a replacement client, resolves required signing credentials, and validates the account with a minimal favorites request before committing the complete config update and publishing the client. Failure or cancellation before that commit leaves the database and current client unchanged. Once the database commit is admitted, publication finishes as an owned transition even if shutdown starts; shutdown-time scheduler maintenance is skipped, and post-commit maintenance failures are logged without reporting a false rollback.
+
+An affected source cannot be reconfigured while its catalog request, sync, scan, queued/current download, or soft-cancelled SDK download is still active. The auth or config endpoint returns HTTP 409; retry the same action after that work finishes. Other sources remain available. OAuth codes and Tidal PKCE handles are not consumed when this busy check rejects the request.
+
 ## Features
 
 ### Library
@@ -175,7 +181,7 @@ All endpoints live under `/api` and return JSON. Content-Type is `application/js
 | `/api/sync/run/{source}` | POST | Trigger a sync run (records a row in `sync_runs`) |
 | `/api/sync/history` | GET | `?source=qobuz&limit=10` — sync run history |
 | `/api/config` | GET | Current config as `AppConfig` |
-| `/api/config` | PATCH | Partial update as `ConfigUpdate`; hot-reloads clients if credentials changed |
+| `/api/config` | PATCH | Partial update as `ConfigUpdate`; atomically validates and activates credential changes. Returns 409 while the affected source is busy. |
 | `/api/config/reset` | POST | Wipe library data (albums, tracks, sync_runs). Config and credentials are preserved. Files on disk are untouched. |
 | `/api/ws` | WS | WebSocket channel — emits `download_progress`, `download_complete`, `download_failed`, `sync_started`, `sync_complete`, `library_updated`, `token_expired`, `scan_progress`, `scan_complete`, `album_status_changed` |
 

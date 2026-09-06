@@ -900,11 +900,18 @@ class AppDatabase:
             return row["value"] if row else None
 
     def set_config(self, key: str, value: str):
+        self.set_config_batch({key: value})
+
+    def set_config_batch(self, updates: dict[str, str]) -> None:
+        """Persist a complete config update in one SQLite transaction."""
+        if not updates:
+            return
+        updated_at = datetime.now().isoformat()
         with self._connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
-                (key, value, datetime.now().isoformat()),
+                [(key, str(value), updated_at) for key, value in updates.items()],
             )
 
     def get_all_config(self) -> dict[str, str]:

@@ -2,11 +2,12 @@
 
 import os
 import tempfile
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.main import _init_clients
+from backend.main import _init_clients, _resolve_qobuz_credentials
 from backend.models.database import AppDatabase
 
 
@@ -52,3 +53,53 @@ class TestInitClients:
         with patch("qobuz.QobuzClient", side_effect=ImportError("no module")):
             clients = _init_clients(db)
             assert "qobuz" not in clients
+
+
+async def test_strict_qobuz_resolution_keeps_staged_token_app_id(monkeypatch):
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(app_id="token-bound-app"),
+        streaming=SimpleNamespace(_app_secret=None),
+        _app_secret_cached=False,
+    )
+    monkeypatch.setattr(
+        "qobuz.spoofer.fetch_app_credentials",
+        AsyncMock(return_value=("bundle-app", ["secret"])),
+    )
+    monkeypatch.setattr(
+        "qobuz.spoofer.find_working_secret", AsyncMock(return_value="secret")
+    )
+
+    derived = await _resolve_qobuz_credentials(
+        {"qobuz_token": "token", "qobuz_app_id": "token-bound-app"},
+        client,
+        strict=True,
+    )
+
+    assert derived == {}
+    assert client._transport.app_id == "token-bound-app"
+    assert client.streaming._app_secret == "secret"
+
+
+async def test_strict_qobuz_resolution_surfaces_signing_verification_error(
+    monkeypatch,
+):
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(app_id="web-app"),
+        streaming=SimpleNamespace(_app_secret=None),
+        _app_secret_cached=False,
+    )
+    monkeypatch.setattr(
+        "qobuz.spoofer.fetch_app_credentials",
+        AsyncMock(return_value=("bundle-app", ["secret"])),
+    )
+    monkeypatch.setattr(
+        "qobuz.spoofer.find_working_secret",
+        AsyncMock(side_effect=RuntimeError("no valid signing secret")),
+    )
+
+    with pytest.raises(RuntimeError, match="no valid signing secret"):
+        await _resolve_qobuz_credentials(
+            {"qobuz_token": "token", "qobuz_app_id": "web-app"},
+            client,
+            strict=True,
+        )

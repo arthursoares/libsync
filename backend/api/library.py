@@ -25,7 +25,11 @@ from ..services.tracks import (
     TrackIdentityError,
     resolve_album_track_ids,
 )
-from .lifecycle import require_work_admission
+from .lifecycle import (
+    claim_client_operation,
+    client_operation,
+    require_work_admission,
+)
 
 logger = logging.getLogger("streamrip")
 
@@ -141,7 +145,10 @@ async def get_albums(
 @router.get("/{source}/albums/{album_id}")
 async def get_album_detail(request: Request, source: str, album_id: int):
     service = request.app.state.library_service
-    result = await service.get_album_detail(album_id)
+    album = request.app.state.db.get_album(album_id)
+    operation_source = album["source"] if album is not None else source
+    with client_operation(request, {operation_source}):
+        result = await service.get_album_detail(album_id)
     if result is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
     return result
@@ -151,14 +158,16 @@ async def get_album_detail(request: Request, source: str, album_id: int):
 async def refresh_library(request: Request, source: str):
     require_work_admission(request)
     service = request.app.state.library_service
-    return await service.refresh_library(source)
+    with client_operation(request, {source}):
+        return await service.refresh_library(source)
 
 
 @router.post("/albums/{album_id}/mark-downloaded")
 async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedRequest):
     require_work_admission(request)
     db = request.app.state.db
-    if db.get_album(album_id) is None:
+    album = db.get_album(album_id)
+    if album is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
     sentinel_enabled = _parse_bool(
@@ -169,12 +178,13 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
     if err is not None:
         return err
 
-    try:
-        track_ids = await resolve_album_track_ids(
-            db, request.app.state._clients_ref, album_id
-        )
-    except TrackIdentityError as error:
-        return _track_identity_error(error)
+    with client_operation(request, {album["source"]}):
+        try:
+            track_ids = await resolve_album_track_ids(
+                db, request.app.state._clients_ref, album_id
+            )
+        except TrackIdentityError as error:
+            return _track_identity_error(error)
 
     try:
         await run_thread_write(
@@ -200,15 +210,17 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
 async def unmark_downloaded(request: Request, album_id: int):
     require_work_admission(request)
     db = request.app.state.db
-    if db.get_album(album_id) is None:
+    album = db.get_album(album_id)
+    if album is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
-    try:
-        track_ids = await resolve_album_track_ids(
-            db, request.app.state._clients_ref, album_id
-        )
-    except TrackIdentityError as error:
-        return _track_identity_error(error)
+    with client_operation(request, {album["source"]}):
+        try:
+            track_ids = await resolve_album_track_ids(
+                db, request.app.state._clients_ref, album_id
+            )
+        except TrackIdentityError as error:
+            return _track_identity_error(error)
 
     try:
         await run_thread_write(
@@ -246,12 +258,6 @@ async def start_scan(request: Request):
     _prune_scan_jobs(app.state.scan_jobs, active_job_id=app.state.active_scan_job)
 
     job_id = uuid.uuid4().hex
-    app.state.scan_jobs[job_id] = {
-        "status": "running",
-        "progress": {"scanned": 0, "total": 0},
-        "result": None,
-    }
-    app.state.active_scan_job = job_id
 
     # Wrap the event bus so scan_progress events also update the in-memory
     # job registry — the polling GET endpoint reads that so the UI can show
@@ -302,9 +308,30 @@ async def start_scan(request: Request):
             if app.state.active_scan_job == job_id:
                 app.state.active_scan_job = None
 
-    task = asyncio.create_task(runner())
-    app.state.scan_tasks.add(task)
-    task.add_done_callback(app.state.scan_tasks.discard)
+    operation_claim = claim_client_operation(request, {"qobuz", "tidal"})
+    task = None
+    try:
+        app.state.scan_jobs[job_id] = {
+            "status": "running",
+            "progress": {"scanned": 0, "total": 0},
+            "result": None,
+        }
+        app.state.active_scan_job = job_id
+        task = asyncio.create_task(runner())
+        app.state.scan_tasks.add(task)
+        task.add_done_callback(app.state.scan_tasks.discard)
+        task.add_done_callback(
+            lambda _task: app.state.client_operations.release(operation_claim)
+        )
+    except BaseException:
+        if task is not None:
+            task.cancel()
+            app.state.scan_tasks.discard(task)
+        app.state.scan_jobs.pop(job_id, None)
+        if app.state.active_scan_job == job_id:
+            app.state.active_scan_job = None
+        app.state.client_operations.release(operation_claim)
+        raise
     return {"job_id": job_id}
 
 
@@ -343,7 +370,8 @@ async def search(
     page = max(1, page)
     page_size = max(1, min(page_size, 200))
     offset = (page - 1) * page_size
-    return await service.search(source, q, limit=page_size, offset=offset)
+    with client_operation(request, {source}):
+        return await service.search(source, q, limit=page_size, offset=offset)
 
 
 @router.get("/{source}/playlists")
@@ -354,14 +382,16 @@ async def list_playlists(request: Request, source: str):
     until the SDK gains playlist read methods.
     """
     service = request.app.state.library_service
-    return await service.list_playlists(source)
+    with client_operation(request, {source}):
+        return await service.list_playlists(source)
 
 
 @router.get("/{source}/playlists/{playlist_id}")
 async def get_playlist(request: Request, source: str, playlist_id: int):
     """Fetch a playlist with its track list."""
     service = request.app.state.library_service
-    result = await service.get_playlist(source, playlist_id)
+    with client_operation(request, {source}):
+        result = await service.get_playlist(source, playlist_id)
     if result is None:
         return JSONResponse({"error": "Playlist not found"}, status_code=404)
     return result
