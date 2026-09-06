@@ -179,8 +179,51 @@ class TestMarkDownloaded:
         )
 
         assert resp.status_code == 503
-        assert "Connect Qobuz" in resp.json()["error"]
+        assert resp.json()["error"] == "Connect the album source and retry."
         assert app.state.db.get_album(album_id)["download_status"] == "not_downloaded"
+        assert events == []
+
+    @pytest.mark.parametrize(
+        ("action", "initial_status"),
+        [
+            ("mark-downloaded", "not_downloaded"),
+            ("unmark-downloaded", "complete"),
+        ],
+    )
+    async def test_catalog_sdk_errors_are_sanitized_without_mutation_or_event(
+        self,
+        client,
+        app,
+        album_id,
+        catalog_client,
+        action,
+        initial_status,
+    ):
+        marker = "sdk-internal-marker /private/credentials.json"
+        if initial_status == "complete":
+            app.state.db.set_album_download_state(
+                album_id, downloaded_at="2026-09-06T00:00:00"
+            )
+        before = dict(app.state.db.get_album(album_id))
+        catalog_client.catalog.get_album_with_tracks.side_effect = RuntimeError(marker)
+        events = []
+
+        async def record(data):
+            events.append(data)
+
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        response = await client.post(
+            f"/api/library/albums/{album_id}/{action}",
+            json={} if action == "mark-downloaded" else None,
+        )
+
+        assert response.status_code == 502
+        assert response.json()["error"] == (
+            "Could not load a complete track catalog. Retry later."
+        )
+        assert marker not in response.text
+        assert dict(app.state.db.get_album(album_id)) == before
         assert events == []
 
     @pytest.mark.parametrize(
@@ -237,7 +280,10 @@ class TestMarkDownloaded:
         )
 
         assert resp.status_code == 502
-        assert message in resp.json()["error"]
+        assert resp.json()["error"] == (
+            "Could not load a complete track catalog. Retry later."
+        )
+        assert message not in resp.text
         assert app.state.db.get_album(album_id)["download_status"] == "not_downloaded"
         assert not (folder / ".streamrip.json").exists()
         assert not (tmp_path / "downloads.db").exists()

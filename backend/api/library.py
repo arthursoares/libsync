@@ -13,7 +13,11 @@ from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
 from ..services.download import _parse_bool
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
-from ..services.tracks import TrackIdentityError, resolve_album_track_ids
+from ..services.tracks import (
+    TrackClientUnavailableError,
+    TrackIdentityError,
+    resolve_album_track_ids,
+)
 
 logger = logging.getLogger("streamrip")
 
@@ -24,6 +28,10 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 # endpoint reads it, so a small rolling window is enough — without a cap it
 # grows for the life of the process.
 MAX_FINISHED_SCAN_JOBS = 20
+TRACK_CLIENT_UNAVAILABLE_MESSAGE = "Connect the album source and retry."
+TRACK_IDENTITY_ERROR_MESSAGE = (
+    "Could not load a complete track catalog. Retry later."
+)
 
 
 def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
@@ -59,7 +67,12 @@ def _resolve_downloads_root(db) -> str:
 
 
 def _track_identity_error(error: TrackIdentityError) -> JSONResponse:
-    return JSONResponse({"error": str(error)}, status_code=error.status_code)
+    message = (
+        TRACK_CLIENT_UNAVAILABLE_MESSAGE
+        if isinstance(error, TrackClientUnavailableError)
+        else TRACK_IDENTITY_ERROR_MESSAGE
+    )
+    return JSONResponse({"error": message}, status_code=error.status_code)
 
 
 def _validate_local_folder_path(
