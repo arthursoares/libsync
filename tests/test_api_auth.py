@@ -346,13 +346,74 @@ class TestTidalPoll:
         assert resp.json() == {"status": "error", "error": "access_denied"}
 
     async def test_poll_raising_returns_error_body(self, client, monkeypatch):
+        marker = "poll-internal-marker /private/tidal-response.json"
         monkeypatch.setattr(
             "tidal.auth.poll_device_code",
-            AsyncMock(side_effect=RuntimeError("network blip")),
+            AsyncMock(side_effect=RuntimeError(marker)),
         )
         resp = await client.post("/api/auth/tidal/poll", json={"device_code": "dev-1"})
         assert resp.status_code == 200
-        assert resp.json() == {"status": "error", "error": "network blip"}
+        assert resp.json() == {
+            "status": "error",
+            "error": "Could not check Tidal authorization. Retry or reconnect Tidal.",
+        }
+        assert marker not in resp.text
+
+    async def test_activation_failure_is_sanitized_and_preserves_old_client_and_db(
+        self, client, app, monkeypatch
+    ):
+        marker = "activation-internal-marker /private/tidal-token.json"
+        old_client = Mock()
+        app.state._clients_ref["tidal"] = old_client
+        app.state.db.set_config("tidal_access_token", "old-access-token")
+        old_config = app.state.db.get_all_config()
+
+        candidate = Mock()
+        candidate.__aenter__ = AsyncMock(return_value=candidate)
+        candidate.__aexit__ = AsyncMock(return_value=None)
+        candidate.favorites = Mock()
+        candidate.favorites.get_albums = AsyncMock(
+            side_effect=RuntimeError(marker)
+        )
+
+        def build_client(source, config, *, strict=False):
+            assert source == "tidal"
+            assert strict is True
+            return candidate
+
+        monkeypatch.setattr("backend.main._init_client", build_client)
+        monkeypatch.setattr(
+            "tidal.auth.poll_device_code",
+            AsyncMock(
+                return_value=(
+                    0,
+                    {
+                        "access_token": "new-access-token",
+                        "refresh_token": "new-refresh-token",
+                        "user_id": 999,
+                        "country_code": "US",
+                        "token_expiry": 123456.0,
+                    },
+                )
+            ),
+        )
+
+        response = await client.post(
+            "/api/auth/tidal/poll", json={"device_code": "dev-1"}
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "error",
+            "error": (
+                "Tidal authorization succeeded, but credentials could not be "
+                "activated. Retry or reconnect Tidal."
+            ),
+        }
+        assert marker not in response.text
+        assert app.state.db.get_all_config() == old_config
+        assert app.state._clients_ref["tidal"] is old_client
+        candidate.__aexit__.assert_awaited_once_with(None, None, None)
 
     async def test_authorized_replaces_pkce_credentials_and_auth_method(
         self, client, app, monkeypatch

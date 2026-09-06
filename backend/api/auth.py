@@ -16,6 +16,13 @@ from .lifecycle import client_operation, require_work_admission
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger("streamrip")
+TIDAL_POLL_ERROR_MESSAGE = (
+    "Could not check Tidal authorization. Retry or reconnect Tidal."
+)
+TIDAL_ACTIVATION_ERROR_MESSAGE = (
+    "Tidal authorization succeeded, but credentials could not be activated. "
+    "Retry or reconnect Tidal."
+)
 
 
 class _AuthFlowError(RuntimeError):
@@ -277,14 +284,14 @@ async def tidal_poll(request: Request, body: TidalPollRequest):
         activated = await activate_config_updates(
             request.app, prepare, affected_sources={"tidal"}
         )
-    except _AuthFlowError as error:
+    except _AuthFlowError:
         logger.exception("Tidal poll request failed")
-        return {"status": "error", "error": str(error)}
+        return {"status": "error", "error": TIDAL_POLL_ERROR_MESSAGE}
     except (ClientReloadBusyError, ClientActivationShuttingDownError) as error:
         raise _activation_http_error(error) from error
-    except Exception as error:
+    except Exception:
         logger.exception("Tidal credential activation failed")
-        return {"status": "error", "error": str(error)}
+        return {"status": "error", "error": TIDAL_ACTIVATION_ERROR_MESSAGE}
 
     status = poll_result["status"]
     data = poll_result["data"]
