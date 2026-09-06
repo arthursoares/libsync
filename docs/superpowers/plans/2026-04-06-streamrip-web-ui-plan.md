@@ -1203,7 +1203,7 @@ class AppConfig(BaseModel):
     tidal_access_token: str = ""
     downloads_path: str = ""
     max_connections: int = 6
-    folder_format: str = "{albumartist} - {title} ({year}) [{container}]"
+    folder_format: str = "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
     track_format: str = "{tracknumber:02}. {artist} - {title}{explicit}"
     conversion_enabled: bool = False
     conversion_codec: str = "ALAC"
