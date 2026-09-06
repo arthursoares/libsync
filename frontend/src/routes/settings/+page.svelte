@@ -385,7 +385,7 @@
       });
       const data = await resp.json();
       if (!resp.ok) {
-        throw new Error(data.detail || `HTTP ${resp.status}`);
+        throw Object.assign(new Error(data.detail || `HTTP ${resp.status}`), { status: resp.status });
       }
       if (data.status !== 'authorized') {
         throw new Error(data.error || 'Authorization failed');
@@ -397,7 +397,9 @@
       tidalPkceRedirectInput = '';
     } catch (e: any) {
       tidalPkceError = e?.message ?? 'Failed to exchange code';
-      tidalPkceStep = 'error';
+      // Busy responses leave the backend handle unconsumed. Keep the pasted
+      // URL and let the user retry the same exchange after active work finishes.
+      tidalPkceStep = e?.status === 409 ? 'awaiting_paste' : 'error';
     }
   }
 
