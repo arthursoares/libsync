@@ -7,6 +7,9 @@
   } from '$lib/auth-ui-logic.js';
 
   // Config state
+  let configState = $state<'loading' | 'loaded' | 'error'>('loading');
+  let configRequest = 0;
+  let configInFlight = false;
   let qobuzUserId = $state('');
   let qobuzAuthToken = $state('');
   let qobuzAppId = $state('');
@@ -357,11 +360,12 @@
   }
 
   onDestroy(() => {
+    configRequest++;
     if (_tidalPollTimerId !== null) clearInterval(_tidalPollTimerId);
     if (scanPollTimer) clearInterval(scanPollTimer);
   });
 
-  onMount(async () => {
+  onMount(() => {
     // Handle OAuth redirect result
     const params = new URLSearchParams(window.location.search);
     const oauthResult = params.get('oauth');
@@ -374,51 +378,69 @@
       window.history.replaceState({}, '', '/settings');
     }
 
-    try {
-      const config = await api.config.get();
-      if (config) {
-        qobuzUserId = config.qobuz_user_id ?? '';
-        qobuzAuthToken = config.qobuz_token ?? '';
-        qobuzAppId = config.qobuz_app_id ?? '';
-        qobuzAppSecret = config.qobuz_app_secret ?? '';
-        qobuzQuality = String(config.qobuz_quality ?? 3);
-        qobuzDownloadBooklets = config.qobuz_download_booklets ?? true;
-        tidalQuality = String(config.tidal_quality ?? 3);
-        // Check actual auth status, not just whether token exists
-        try {
-          const statuses = await api.auth.status();
-          qobuzConnected = isSourceAuthenticated(statuses, 'qobuz');
-          tidalConnected = isSourceAuthenticated(statuses, 'tidal');
-          // If a Tidal token exists and was issued via PKCE, surface that
-          // so the HiRes button shows "Connected" instead of inviting another login.
-          if (tidalConnected && config.tidal_auth_method === 'pkce') {
-            tidalPkceStep = 'authorized';
-          }
-        } catch {
-          qobuzConnected = !!config.qobuz_token;
-          tidalConnected = !!config.tidal_access_token;
-        }
-
-        downloadPath = config.downloads_path ?? '';
-        maxConnections = config.max_connections ?? 6;
-        sourceSubdirectories = config.source_subdirectories ?? false;
-        discSubdirectories = config.disc_subdirectories ?? true;
-        folderFormat = config.folder_format ?? '{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]';
-        trackFormat = config.track_format ?? '{tracknumber:02}. {artist} - {title}{explicit}';
-
-        embedArtwork = config.embed_artwork ?? true;
-        artworkSize = config.artwork_size ?? 'large';
-
-        autoSyncEnabled = config.auto_sync_enabled ?? false;
-        syncInterval = config.auto_sync_interval ?? '6h';
-        scanSentinelWriteEnabled = config.scan_sentinel_write_enabled ?? true;
-      }
-    } catch (e) {
-      // Config not yet set — use defaults
-    }
+    void loadSettings();
   });
 
+  async function loadSettings() {
+    if (configInFlight || configState === 'loaded') return;
+    const request = ++configRequest;
+    configInFlight = true;
+    configState = 'loading';
+    try {
+      const config = await api.config.get();
+      if (request !== configRequest) return;
+      if (!config || typeof config !== 'object' || Array.isArray(config)) {
+        throw new Error('Invalid configuration response');
+      }
+      qobuzUserId = config.qobuz_user_id ?? '';
+      qobuzAuthToken = config.qobuz_token ?? '';
+      qobuzAppId = config.qobuz_app_id ?? '';
+      qobuzAppSecret = config.qobuz_app_secret ?? '';
+      qobuzQuality = String(config.qobuz_quality ?? 3);
+      qobuzDownloadBooklets = config.qobuz_download_booklets ?? true;
+      tidalQuality = String(config.tidal_quality ?? 3);
+      downloadPath = config.downloads_path ?? '';
+      maxConnections = config.max_connections ?? 6;
+      sourceSubdirectories = config.source_subdirectories ?? false;
+      discSubdirectories = config.disc_subdirectories ?? true;
+      folderFormat = config.folder_format ?? '{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]';
+      trackFormat = config.track_format ?? '{tracknumber:02}. {artist} - {title}{explicit}';
+
+      embedArtwork = config.embed_artwork ?? true;
+      artworkSize = config.artwork_size ?? 'large';
+
+      autoSyncEnabled = config.auto_sync_enabled ?? false;
+      syncInterval = config.auto_sync_interval ?? '6h';
+      scanSentinelWriteEnabled = config.scan_sentinel_write_enabled ?? true;
+      configState = 'loaded';
+      // Hydrate the whole form before starting this independent status check.
+      void loadAuthStatus(config, request);
+    } catch {
+      if (request === configRequest) configState = 'error';
+    } finally {
+      if (request === configRequest) configInFlight = false;
+    }
+  }
+
+  async function loadAuthStatus(config: Record<string, any>, request: number) {
+    try {
+      const statuses = await api.auth.status();
+      if (request !== configRequest) return;
+      qobuzConnected = isSourceAuthenticated(statuses, 'qobuz');
+      tidalConnected = isSourceAuthenticated(statuses, 'tidal');
+      if (tidalConnected && config.tidal_auth_method === 'pkce') {
+        tidalPkceStep = 'authorized';
+      }
+    } catch {
+      if (request !== configRequest) return;
+      qobuzConnected = !!config.qobuz_token;
+      tidalConnected = !!config.tidal_access_token;
+    }
+  }
+
   async function saveSettings() {
+    if (configState !== 'loaded' || saving) return;
+    configRequest++; // Ignore a late initial auth check after saving changed credentials.
     saving = true;
     saveError = '';
     saveSuccess = false;
@@ -479,12 +501,20 @@
     {#if saveSuccess}
       <span class="save-ok">Saved</span>
     {/if}
-    <button class="btn btn-primary btn-sm" onclick={saveSettings} disabled={saving}>
+    <button class="btn btn-primary btn-sm" onclick={saveSettings} disabled={saving || configState !== 'loaded'}>
       {saving ? 'Saving…' : 'Save Changes'}
     </button>
   </div>
 </div>
 
+{#if configState === 'loading'}
+  <p role="status">Loading settings…</p>
+{:else if configState === 'error'}
+  <div class="settings-row">
+    <p role="alert" class="save-error">Could not load settings. Your saved settings have not been changed.</p>
+    <button class="btn btn-secondary btn-sm" onclick={loadSettings}>Retry</button>
+  </div>
+{:else}
 <!-- ── Qobuz ── -->
 <div class="settings-section">
   <div class="settings-section-header">
@@ -942,6 +972,8 @@
 
 {#if scanOpen}
   <ScanReview result={scanResultState} onConfirm={onScanConfirm} onClose={onScanClose} />
+{/if}
+
 {/if}
 
 <style>

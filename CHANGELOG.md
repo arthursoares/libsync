@@ -6,6 +6,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 
 ### Fixed
 
+- **Settings load protection.** Save stays disabled until configuration loads successfully, with a visible retry action on failure and no partial form hydration during auth checks.
 - **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged.
 
 ## v0.0.6 — 2026-04-27

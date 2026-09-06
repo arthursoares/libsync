@@ -70,6 +70,15 @@ frontend/
 
 - `npm run build` verifies the app compiles for production
 - `npm run check` runs `svelte-check`
-- `node --test frontend/tests/*.test.js` covers small shared logic helpers
+- `npm test` (from `frontend/`) covers shared logic, Vite configuration, and mounted
+  production components using Node's test runner, the Svelte compiler, and jsdom 26
+  (compatible with CI's Node 20). The test-only loader resolves `$lib` and compiles
+  Svelte/TypeScript imports; it does not replace component logic. API calls are mocked.
+
+For a manual Settings load check, delay or block `/api/config` in browser Network
+tools. Save must stay disabled and fields must not show placeholder defaults as
+loaded settings. On failure, check the error message and Retry; unblock the request
+and retry to confirm saved values appear before Save becomes available. Do not save
+against a real configuration just to test this failure path.
 
 There is currently no browser e2e harness wired into the frontend package.
