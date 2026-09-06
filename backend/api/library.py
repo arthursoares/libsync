@@ -29,9 +29,7 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 # grows for the life of the process.
 MAX_FINISHED_SCAN_JOBS = 20
 TRACK_CLIENT_UNAVAILABLE_MESSAGE = "Connect the album source and retry."
-TRACK_IDENTITY_ERROR_MESSAGE = (
-    "Could not load a complete track catalog. Retry later."
-)
+TRACK_IDENTITY_ERROR_MESSAGE = "Could not load a complete track catalog. Retry later."
 
 
 def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
