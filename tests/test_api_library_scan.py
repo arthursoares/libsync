@@ -9,6 +9,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.main import create_app
+from backend.models.database import (
+    AlbumDownloadStateConflictError,
+    AlbumDownloadStateError,
+    AlbumNotFoundError,
+)
 
 
 @pytest.fixture
@@ -128,8 +133,61 @@ class TestMarkDownloaded:
         )
 
         assert resp.status_code == 409
-        assert "downloading" in resp.json()["error"]
+        assert resp.json()["error"] == (
+            "Album is queued or downloading. Wait for it to finish."
+        )
         assert app.state.db.get_album(album_id)["download_status"] == "downloading"
+        assert events == []
+
+    @pytest.mark.parametrize(
+        ("error_type", "status_code", "public_message"),
+        [
+            (AlbumNotFoundError, 404, "Album not found"),
+            (
+                AlbumDownloadStateConflictError,
+                409,
+                "Album is queued or downloading. Wait for it to finish.",
+            ),
+            (
+                AlbumDownloadStateError,
+                500,
+                "Could not update album download state",
+            ),
+        ],
+    )
+    async def test_download_state_domain_errors_are_sanitized(
+        self,
+        client,
+        app,
+        album_id,
+        monkeypatch,
+        error_type,
+        status_code,
+        public_message,
+    ):
+        marker = "database-internal-marker /private/library.db"
+        before = dict(app.state.db.get_album(album_id))
+        events = []
+
+        def fail_reconciliation(*args, **kwargs):
+            raise error_type(marker)
+
+        async def record(data):
+            events.append(data)
+
+        monkeypatch.setattr(
+            "backend.api.library.mark_album_downloaded", fail_reconciliation
+        )
+        app.state.event_bus.subscribe("album_status_changed", record)
+
+        response = await client.post(
+            f"/api/library/albums/{album_id}/mark-downloaded", json={}
+        )
+
+        assert response.status_code == status_code
+        assert response.json()["error"] == public_message
+        assert marker not in response.text
+        assert dict(app.state.db.get_album(album_id)) == before
         assert events == []
 
     async def test_locked_dedup_database_returns_error_without_success_event(
