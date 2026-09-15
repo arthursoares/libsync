@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from ..models.database import AppDatabase
+from ..models.schemas import DEFAULT_FOLDER_FORMAT, DEFAULT_TRACK_FORMAT
 from .event_bus import EventBus
 from .paths import resolve_database_dir
 from .tasks import await_task_completion
@@ -572,9 +573,8 @@ class DownloadService:
             ),
             "quality": quality,
             "folder_format": self.db.get_config("folder_format")
-            or "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]",
-            "track_format": self.db.get_config("track_format")
-            or "{tracknumber:02d}. {artist} - {title}",
+            or DEFAULT_FOLDER_FORMAT,
+            "track_format": self.db.get_config("track_format") or DEFAULT_TRACK_FORMAT,
             "max_connections": int(
                 self.db.get_config("max_connections") or self.max_connections
             ),

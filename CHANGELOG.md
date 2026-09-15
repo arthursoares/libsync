@@ -22,6 +22,7 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 - **Safe legacy sentinel reconciliation.** The downloads scan now discovers Qobuz and Tidal sentinels itself, requires a complete online catalog and matching local audio set, records the actual folder, and uses the same atomic album/dedup update as manual and fuzzy reconciliation. Malformed, partial, offline, or unsafe folders are reported without aborting healthy entries.
 - **Owned shutdown drainage.** Shutdown now rejects new background work, drains the current album without advancing queued downloads, interrupts and records active syncs, cooperatively stops scans after cancellation-safe off-loop writes, waits for progress events, and only then closes current SDK clients. Repeated caller cancellation is propagated after the retained cleanup operation finishes.
 - **Transactional credential reloads.** Qobuz and Tidal credential changes now build, open, and validate replacement SDK clients before atomically persisting credentials and publishing them through the shared client map. Active source work returns HTTP 409 without being interrupted; failed or cancelled activation preserves the previous credentials and exact client objects.
+- **Consistent naming defaults.** Unset folder and track naming formats now use the same canonical defaults in Settings, the config API, and both source downloaders; explicitly stored custom formats remain unchanged.
 
 ---
 
