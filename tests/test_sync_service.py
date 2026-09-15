@@ -36,6 +36,31 @@ class TestSyncService:
         assert diff["new_albums"] == []
         assert diff["removed_albums"] == []
         assert diff["source"] == "qobuz"
+        assert diff["connected"] is False
+
+    async def test_get_diff_connected_with_client(self, db, event_bus):
+        # A present client (even with an empty favorites page) should be
+        # reported as connected — this is what distinguishes "synced" from
+        # "source not connected" on the Sync page.
+        empty_page = MagicMock()
+        empty_page.items = []
+        empty_page.total = 0
+        empty_page.limit = 500
+
+        mock_client = MagicMock()
+        mock_client.favorites = MagicMock()
+        mock_client.favorites.get_albums = AsyncMock(return_value=empty_page)
+
+        clients = {"qobuz": mock_client}
+        library_service = LibraryService(db, event_bus, clients=clients)
+        service = SyncService(
+            db, event_bus, clients=clients, library_service=library_service
+        )
+
+        diff = await service.get_diff("qobuz")
+        assert diff["connected"] is True
+        assert diff["new_albums"] == []
+        assert diff["removed_albums"] == []
 
     async def test_run_sync_records_history(self, db, event_bus):
         # Mock the Qobuz SDK client's favorites namespace. Empty result

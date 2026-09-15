@@ -91,13 +91,13 @@ class TestAutoSyncLoop:
         service = _make_service(db, event_bus, run_sync_impl=fake_run_sync)
         # 10ms interval — fast enough to test, slow enough that the loop
         # is event-loop-friendly.
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
 
         # Wait long enough for ~3 syncs to fire
         await asyncio.sleep(0.05)
 
         # Cancel before asserting so the loop doesn't keep running
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         # Give the cancellation a chance to take effect
         await asyncio.sleep(0)
 
@@ -114,14 +114,14 @@ class TestAutoSyncLoop:
             return {"status": "complete"}
 
         service = _make_service(db, event_bus, run_sync_impl=fake_run_sync)
-        service.start_auto_sync("qobuz", interval_seconds=0.05)
+        await service.start_auto_sync("qobuz", interval_seconds=0.05)
 
         # Immediately after start, no sync has happened yet (still sleeping)
         assert call_count["n"] == 0
 
         # Wait > one interval
         await asyncio.sleep(0.08)
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         await asyncio.sleep(0)
 
         # At least one sync should have run
@@ -142,11 +142,11 @@ class TestStopAutoSync:
             return {"status": "complete"}
 
         service = _make_service(db, event_bus, run_sync_impl=fake_run_sync)
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
 
         await asyncio.sleep(0.03)
         snapshot = call_count["n"]
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
 
         # Wait again — call count must NOT keep growing
         await asyncio.sleep(0.05)
@@ -159,7 +159,7 @@ class TestStopAutoSync:
     async def test_stop_when_not_running_is_noop(self, db, event_bus):
         service = _make_service(db, event_bus)
         # No start was ever called
-        service.stop_auto_sync()  # Must not raise
+        await service.stop_auto_sync()  # Must not raise
         assert service._auto_sync_task is None
 
     async def test_starting_again_cancels_previous_task(self, db, event_bus):
@@ -172,7 +172,7 @@ class TestStopAutoSync:
             return {"status": "complete"}
 
         service = _make_service(db, event_bus, run_sync_impl=first_run_sync)
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
         first_task = service._auto_sync_task
 
         # Replace run_sync and restart
@@ -181,11 +181,11 @@ class TestStopAutoSync:
             return {"status": "complete"}
 
         service.run_sync = second_run_sync  # type: ignore[assignment]
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
         second_task = service._auto_sync_task
 
         await asyncio.sleep(0.05)
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         await asyncio.sleep(0)
 
         assert first_task is not second_task
@@ -209,10 +209,10 @@ class TestDownloadNewForwarding:
             return {"status": "complete"}
 
         service = _make_service(db, event_bus, run_sync_impl=fake_run_sync)
-        service.start_auto_sync("qobuz", interval_seconds=0.01, download_new=True)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01, download_new=True)
 
         await asyncio.sleep(0.04)
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         await asyncio.sleep(0)
 
         assert len(captured) >= 1
@@ -229,10 +229,10 @@ class TestDownloadNewForwarding:
 
         service = _make_service(db, event_bus, run_sync_impl=fake_run_sync)
         # No download_new kwarg → defaults to True
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
 
         await asyncio.sleep(0.03)
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         await asyncio.sleep(0)
 
         assert len(captured) >= 1
@@ -356,10 +356,10 @@ class TestLoopResilience:
             return {"status": "complete"}
 
         service = _make_service(db, event_bus, run_sync_impl=flaky_run_sync)
-        service.start_auto_sync("qobuz", interval_seconds=0.01)
+        await service.start_auto_sync("qobuz", interval_seconds=0.01)
 
         await asyncio.sleep(0.05)
-        service.stop_auto_sync()
+        await service.stop_auto_sync()
         await asyncio.sleep(0)
 
         # The loop survived the first exception and ran a second time

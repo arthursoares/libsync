@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
-  import { currentSource, selectedAlbum, loadAlbumDetail } from '$lib/stores/library';
+  import { currentSource, selectedAlbum, selectAlbum, loadAlbumDetail, clearAlbumDetail } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
 
   let source = $derived($currentSource);
   let detail = $derived($selectedAlbum);
@@ -21,6 +22,11 @@
   let searchError = $state('');
   const PAGE_SIZE = 60;
 
+  // Monotonic token guarding against out-of-order responses (issue #43):
+  // a slower, older runSearch() call must not clobber a newer one's
+  // results when source or query change in quick succession.
+  let reqSeq = 0;
+
   // ── UI state ──
   let viewMode = $state<'grid' | 'table'>('grid');
   let detailOpen = $state(false);
@@ -30,6 +36,7 @@
   let selectMode = $state(false);
   let selectedAlbums = $state<Set<string>>(new Set());
   let batchDownloading = $state(false);
+  let batchRequest = 0;
 
   function toggleSelectMode() {
     selectMode = !selectMode;
@@ -48,7 +55,8 @@
   }
 
   async function downloadSelected() {
-    if (selectedAlbums.size === 0) return;
+    if (selectedAlbums.size === 0 || batchDownloading) return;
+    const request = ++batchRequest;
     batchDownloading = true;
     try {
       // Search results already carry the full metadata — pass it through
@@ -64,23 +72,26 @@
           track_count: r.track_count ?? null,
           release_date: r.release_date ?? null,
         }));
-      await api.downloads.enqueue(source, [...selectedAlbums], { albums });
+      await enqueueDownloads(source, [...selectedAlbums], { albums });
+      if (request !== batchRequest) return;
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
-      batchDownloading = false;
+      if (request === batchRequest) batchDownloading = false;
     }
   }
 
   // ── Search execution ──
   async function runSearch(query: string, append = false) {
     if (!query.trim()) {
+      reqSeq++;
       results = [];
       total = 0;
       hasSearched = false;
       searchError = '';
       return;
     }
+    const seq = ++reqSeq;
     if (append) {
       loadingMore = true;
     } else {
@@ -95,6 +106,7 @@
         page: String(currentPage),
         page_size: String(PAGE_SIZE),
       });
+      if (seq !== reqSeq) return;
       // Backend now returns {albums, total, limit, offset}
       // Old shape compat: if it's an array, treat it as a single page
       const incoming = Array.isArray(data) ? data : (data.albums ?? []);
@@ -102,6 +114,7 @@
       results = append ? [...results, ...incoming] : incoming;
       total = incomingTotal;
     } catch (err) {
+      if (seq !== reqSeq) return;
       console.error('Search failed', err);
       searchError = err instanceof Error ? err.message : 'Search failed';
       if (!append) {
@@ -109,8 +122,10 @@
         total = 0;
       }
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (seq === reqSeq) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 
@@ -145,26 +160,44 @@
 
   // ── Album detail ──
   async function handleSelectAlbum(album: any) {
-    $selectedAlbum = album;
+    if (album.source && album.source !== source) return;
+    selectAlbum({ ...album, source: album.source ?? source });
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {
-        await loadAlbumDetail(source, album.id);
+        await loadAlbumDetail(album.source ?? source, album.id);
       } catch { /* search result may not be in DB */ }
     }
   }
 
   function closeDetail() {
     detailOpen = false;
+    clearAlbumDetail();
   }
+
+  $effect(() => {
+    source;
+    untrack(() => {
+      selectedAlbums = new Set();
+      selectMode = false;
+      batchRequest++;
+      batchDownloading = false;
+      closeDetail();
+      results = [];
+      total = 0;
+    });
+  });
+
+  onDestroy(clearAlbumDetail);
 
   // Re-run search when source changes (if there's an active query)
   $effect(() => {
-    const _s = source;
-    if (activeQuery) {
-      currentPage = 1;
-      runSearch(activeQuery);
-    }
+    source;
+    // runSearch reads and changes pagination; only source belongs in this
+    // effect's dependencies, not currentPage or the last submitted query.
+    untrack(() => {
+      if (activeQuery) runSearch(activeQuery);
+    });
   });
 
   let searchInput: HTMLInputElement;

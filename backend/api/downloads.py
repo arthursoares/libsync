@@ -1,10 +1,16 @@
 """Downloads API routes."""
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from ..models.schemas import DownloadRequest
+from ..services.download import DownloadServiceStoppingError
+from ..services.paths import resolve_database_dir, resolve_downloads_root
+from ..services.sentinels import reconcile_sentinels
+from .lifecycle import client_operation, require_work_admission
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
+DOWNLOAD_SERVICE_STOPPING_MESSAGE = "Download service is shutting down"
 
 
 @router.get("/queue")
@@ -49,15 +55,25 @@ async def get_queue(request: Request):
 
 @router.post("/queue")
 async def enqueue(request: Request, body: DownloadRequest):
+    require_work_admission(request)
     service = request.app.state.download_service
     supplied = (
         {m.source_album_id: m.model_dump() for m in body.albums}
         if body.albums
         else None
     )
-    return await service.enqueue(
-        body.source, body.album_ids, force=body.force, supplied_metadata=supplied
-    )
+    try:
+        with client_operation(request, {body.source}):
+            return await service.enqueue(
+                body.source,
+                body.album_ids,
+                force=body.force,
+                supplied_metadata=supplied,
+            )
+    except DownloadServiceStoppingError:
+        return JSONResponse(
+            {"error": DOWNLOAD_SERVICE_STOPPING_MESSAGE}, status_code=503
+        )
 
 
 @router.delete("/queue/{item_id}")
@@ -70,43 +86,16 @@ async def remove_from_queue(request: Request, item_id: str):
 @router.post("/scan")
 async def scan_downloads(request: Request):
     """Scan the download directory for .streamrip.json files and reconcile with DB."""
-    from datetime import datetime
-
-    from qobuz.downloader import AlbumDownloader
-
+    require_work_admission(request)
     db = request.app.state.db
-    download_path = db.get_config("downloads_path") or "/music"
-
-    albums = AlbumDownloader.scan_downloaded_albums(download_path)
-    reconciled = 0
-
-    for meta in albums:
-        source = meta.get("source", "qobuz")
-        album_id = meta.get("album_id")
-        if not album_id:
-            continue
-
-        existing = db.get_album_by_source_id(source, album_id)
-        if existing is None:
-            db.upsert_album(
-                source=source,
-                source_album_id=album_id,
-                title=meta.get("title", "Unknown"),
-                artist=meta.get("artist", "Unknown"),
-                track_count=meta.get("tracks_count"),
-                added_to_library_at=meta.get(
-                    "downloaded_at", datetime.now().isoformat()
-                ),
-            )
-
-        db.update_album_status(
-            db.get_album_by_source_id(source, album_id)["id"],
-            "complete",
-            downloaded_at=meta.get("downloaded_at"),
+    with client_operation(request, {"qobuz", "tidal"}):
+        return await reconcile_sentinels(
+            db,
+            request.app.state._clients_ref,
+            request.app.state.event_bus,
+            download_root=resolve_downloads_root(db),
+            dedup_db_dir=resolve_database_dir(db),
         )
-        reconciled += 1
-
-    return {"scanned": len(albums), "reconciled": reconciled}
 
 
 @router.post("/cancel")

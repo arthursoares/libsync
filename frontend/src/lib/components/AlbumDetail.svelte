@@ -36,8 +36,8 @@
 
   import { onDestroy } from 'svelte';
   import { api } from '$lib/api/client';
-  import { currentSource, loadAlbumDetail } from '$lib/stores/library';
-  import { lastCompletedDownload, liveTrackStatuses } from '$lib/stores/downloads';
+  import { loadAlbumDetail, captureAlbumSelection } from '$lib/stores/library';
+  import { lastCompletedDownload, liveTrackStatuses, enqueueDownloads } from '$lib/stores/downloads';
 
   let {
     album,
@@ -51,19 +51,23 @@
 
   let downloading = $state(false);
   let downloadError = $state('');
-  let source = $derived($currentSource);
+  let source = $derived(album?.source);
 
   // Re-fetch album detail when a download completes for this album
+  let listeningForCompletions = false;
   const unsubscribeDownloadComplete = lastCompletedDownload.subscribe((completed) => {
-    if (!completed || !album || !open) return;
-    const completedAlbumId = completed.album_id ?? completed.source_album_id ?? completed.item_id;
-    const currentAlbumId = album.source_album_id ?? String(album.id);
-    if (completedAlbumId && currentAlbumId && String(completedAlbumId) === String(currentAlbumId)) {
+    if (!listeningForCompletions || !completed || !album || !open || !source) return;
+    if (completed.source !== source) return;
+    const matchesAlbum = album.source_album_id
+      ? String(completed.source_album_id) === String(album.source_album_id)
+      : completed.album_db_id === album.id;
+    if (matchesAlbum) {
       if (album.id && album.id > 0) {
         loadAlbumDetail(source, album.id).catch(() => {});
       }
     }
   });
+  listeningForCompletions = true; // Do not replay an old completion when mounting a new panel.
 
   onDestroy(() => {
     unsubscribeDownloadComplete();
@@ -218,34 +222,33 @@
   let markLoading = $state(false);
 
   async function markOrUnmark() {
-    if (!album) return;
+    if (!album || !source) return;
+    const target = album;
+    const targetSource = source;
+    const isCurrentSelection = captureAlbumSelection(targetSource, target.id);
     markLoading = true;
     try {
-      if (album.download_status === 'complete') {
-        await api.library.unmarkDownloaded(album.id);
+      if (target.download_status === 'complete') {
+        await api.library.unmarkDownloaded(target.id);
       } else {
-        await api.library.markDownloaded(album.id, null);
+        await api.library.markDownloaded(target.id, null);
       }
       // Reload via the store so the parent prop updates (mirrors the
       // download-complete refetch pattern already used in this component)
-      await loadAlbumDetail(source, album.id);
+      if (open && isCurrentSelection()) await loadAlbumDetail(targetSource, target.id);
     } finally {
       markLoading = false;
     }
   }
 
   async function handleDownload(force: boolean = false) {
-    if (!album) return;
+    if (!album || !source) return;
     const albumId = album.source_album_id || String(album.id);
     downloading = true;
     downloadError = '';
     downloadQueued = false;
     try {
-      await fetch('/api/downloads/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, album_ids: [albumId], force }),
-      });
+      await enqueueDownloads(source, [albumId], { force });
       downloadQueued = true;
       setTimeout(() => { downloadQueued = false; }, 3000);
     } catch (e: any) {

@@ -5,9 +5,15 @@ const handlers = new Map<string, EventHandler[]>();
 
 let socket: WebSocket | null = null;
 
+export const connected = writable(false);
+
 export function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+
+  socket.onopen = () => {
+    connected.set(true);
+  };
 
   socket.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -17,7 +23,12 @@ export function connectWebSocket() {
     }
   };
 
+  socket.onerror = () => {
+    connected.set(false);
+  };
+
   socket.onclose = () => {
+    connected.set(false);
     setTimeout(connectWebSocket, 3000);
   };
 }
@@ -26,5 +37,3 @@ export function onEvent(type: string, handler: EventHandler) {
   if (!handlers.has(type)) handlers.set(type, []);
   handlers.get(type)!.push(handler);
 }
-
-export const connected = writable(false);

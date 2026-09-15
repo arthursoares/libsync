@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { currentSource } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
 
   let source = $derived($currentSource);
 
@@ -81,7 +82,7 @@
     );
     if (albumIds.length === 0) return;
     try {
-      await api.downloads.enqueue(source, albumIds);
+      await enqueueDownloads(source, albumIds);
     } catch (e) {
       console.error('Failed to enqueue playlist downloads', e);
     }
@@ -297,7 +298,7 @@
     border-bottom: 2px solid var(--border);
   }
   .playlist-row:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .playlist-name {
@@ -400,7 +401,7 @@
     cursor: pointer;
   }
   .close-btn:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .detail-actions {
@@ -429,7 +430,7 @@
     border-bottom: 1px solid var(--border-subtle);
   }
   .track-row:hover {
-    background: var(--canvas-hover);
+    background: var(--pop-subtle);
   }
 
   .track-num {

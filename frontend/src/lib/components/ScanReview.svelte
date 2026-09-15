@@ -23,13 +23,16 @@
     auto_matched?: { album_id: number; folder: string; reason: string }[];
     review?: ReviewEntry[];
     unmatched?: string[];
+    failed?: { folder: string; album_id: number; error: string }[];
     error?: string;
   }
 
-  let { result, onConfirm, onClose } = $props<{
+  let { result, onConfirm, onClose, onRetry, onRestart } = $props<{
     result: ScanResult;
     onConfirm: (albumId: number, folder: string) => Promise<void>;
     onClose: () => void;
+    onRetry?: () => void;
+    onRestart?: () => void;
   }>();
 
   let expanded = $state<{ auto: boolean; review: boolean; unmatched: boolean }>({
@@ -43,7 +46,7 @@
       await onConfirm(candidate.album_id, entry.folder);
       // Remove the entry from the list.
       if (result.review) {
-        result.review = result.review.filter(e => e !== entry);
+        result.review = result.review.filter((e: ReviewEntry) => e !== entry);
       }
     } finally {
       processing.delete(candidate.album_id);
@@ -68,7 +71,13 @@
     {#if result.status === 'running'}
       <p>Scanning… {result.scanned ?? 0} / {result.total ?? '?'}</p>
     {:else if result.status === 'error'}
-      <p class="error">Scan failed: {result.error}</p>
+      <p class="error" role="alert">Scan failed: {result.error}</p>
+      {#if onRetry}
+        <button class="btn btn-secondary btn-sm" onclick={onRetry}>Retry status</button>
+      {/if}
+      {#if onRestart}
+        <button class="btn btn-secondary btn-sm" onclick={onRestart}>Start new scan</button>
+      {/if}
     {:else}
       <p class="summary">
         Scanned {result.scanned} folders ·
@@ -76,6 +85,7 @@
         {result.review?.length ?? 0} need review ·
         {result.unmatched?.length ?? 0} unmatched
         {#if result.sentinel_skipped}· {result.sentinel_skipped} already sentineled{/if}
+        {#if result.failed?.length}· {result.failed.length} failed{/if}
       </p>
 
       <!-- Auto-matched -->

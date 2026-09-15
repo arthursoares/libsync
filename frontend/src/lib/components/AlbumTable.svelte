@@ -79,6 +79,7 @@
       case 'queued': return 'Queued';
       case 'downloading': return 'Downloading';
       case 'partial': return 'Partial';
+      case 'failed': return 'Failed';
       default: return '—';
     }
   }
@@ -87,6 +88,7 @@
     switch (s.toLowerCase()) {
       case 'complete': case 'downloaded': return 'status-complete';
       case 'queued': case 'downloading': return 'status-active';
+      case 'failed': return 'status-failed';
       default: return 'status-none';
     }
   }
@@ -322,6 +324,7 @@
   .status-complete { background: var(--positive); }
   .status-active { background: var(--accent); }
   .status-none { background: var(--canvas-inset); }
+  .status-failed { background: var(--warning); }
   .status-text { font-size: var(--text-xs); color: var(--text-tertiary); }
 
   /* Checkbox */

@@ -9,8 +9,15 @@ from typing import Any
 
 from ..models.database import AppDatabase
 from .event_bus import EventBus
+from .paths import resolve_database_dir
+from .tasks import await_task_completion
+from .tracks import resolve_album_track_ids
 
 logger = logging.getLogger("streamrip")
+
+
+class DownloadServiceStoppingError(RuntimeError):
+    """The download service is draining and no longer accepts work."""
 
 
 def _parse_bool(value: str | None, *, default: bool) -> bool:
@@ -24,6 +31,68 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in ("true", "1", "yes")
 
 
+SENTINEL_FILENAME = ".streamrip.json"
+
+# Queue item states that will never change again.
+TERMINAL_STATUSES = ("complete", "failed", "cancelled")
+
+# How many finished items the in-memory queue keeps.  The queue doubles as
+# the UI's live history, but the durable history comes from the DB, so a
+# small rolling window is enough.
+MAX_TERMINAL_QUEUE_ITEMS = 100
+
+
+def _remove_album_sentinel(folder: str | None) -> None:
+    """Best-effort delete of the SDK-written sentinel in ``folder``.
+
+    Both SDK downloaders drop a ``.streamrip.json`` as soon as one track
+    succeeds, and ``run_scan`` skips any folder that has one. A download
+    that fails the success threshold must therefore take the sentinel back
+    off disk, or the half-downloaded folder is invisible to reconciliation
+    forever.
+    """
+    if not folder:
+        return
+    try:
+        os.remove(os.path.join(folder, SENTINEL_FILENAME))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("download: could not remove sentinel in %s: %s", folder, exc)
+
+
+def _album_folder_from_result(result) -> str | None:
+    """Derive the album folder the SDK downloaded into, or None.
+
+    The two SDKs name the per-track file differently — Qobuz's
+    ``TrackResult`` carries ``path``, Tidal's carries ``file_path`` — so
+    probe both defensively. Multi-disc downloads put discs after the first
+    in a ``Disc N/`` subfolder while the sentinel lives in the album folder
+    itself, so take the common parent of every successful track rather than
+    one arbitrary dirname.
+    """
+    folders: list[str] = []
+    for track in getattr(result, "tracks", None) or []:
+        if not getattr(track, "success", False):
+            continue
+        path = getattr(track, "path", None) or getattr(track, "file_path", None)
+        if not path:
+            continue
+        folder = os.path.dirname(path)
+        if folder:
+            folders.append(folder)
+
+    if not folders:
+        return None
+    if len(folders) == 1:
+        return folders[0]
+    try:
+        return os.path.commonpath(folders)
+    except ValueError:
+        # Mixed absolute/relative paths — fall back to the shallowest.
+        return min(folders, key=len)
+
+
 class DownloadService:
     def __init__(
         self,
@@ -32,15 +101,24 @@ class DownloadService:
         clients: dict,
         download_path: str,
         max_connections: int = 6,
+        client_operations=None,
     ):
         self.db = db
         self.event_bus = event_bus
         self.clients = clients
         self.download_path = download_path
         self.max_connections = max_connections
+        self.client_operations = client_operations
         self._queue: list[dict[str, Any]] = []
         self._cancel_requested: set[str] = set()
         self._worker_task: asyncio.Task | None = None
+        self._progress_tasks: set[asyncio.Task] = set()
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._stopping = False
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopping
 
     async def _fetch_album_metadata(self, source: str, source_album_id: str) -> dict:
         """Fetch real album metadata from the streaming service.
@@ -110,84 +188,180 @@ class DownloadService:
         force: bool = False,
         supplied_metadata: dict[str, dict] | None = None,
     ) -> list[dict]:
-        items = []
-        supplied_metadata = supplied_metadata or {}
-        for source_album_id in album_ids:
-            album = self.db.get_album_by_source_id(source, source_album_id)
-            if album is None:
-                # Prefer metadata supplied by the caller (e.g. search results
-                # already carry title/artist/cover). Only round-trip to the
-                # streaming service when the caller has nothing for us.
-                supplied = supplied_metadata.get(source_album_id)
-                if supplied is not None:
-                    meta = {
-                        "title": supplied["title"],
-                        "artist": supplied["artist"],
-                        "cover_url": supplied.get("cover_url"),
-                        "track_count": supplied.get("track_count"),
-                        "release_date": supplied.get("release_date"),
-                    }
-                else:
-                    meta = await self._fetch_album_metadata(source, source_album_id)
-                album_id = self.db.upsert_album(
-                    source=source,
-                    source_album_id=source_album_id,
-                    title=meta["title"],
-                    artist=meta["artist"],
-                    cover_url=meta.get("cover_url"),
-                    track_count=meta.get("track_count"),
-                    release_date=meta.get("release_date"),
-                    added_to_library_at=datetime.now().isoformat(),
+        if self.client_operations is not None:
+            with self.client_operations.operation({source}):
+                return await self._enqueue(
+                    source,
+                    album_ids,
+                    force=force,
+                    supplied_metadata=supplied_metadata,
                 )
-                album = self.db.get_album(album_id)
-                if album is None:
-                    logger.warning(
-                        "Failed to create album entry for %s", source_album_id
-                    )
-                    continue
-                logger.info(
-                    "Auto-created album entry for %s: %s — %s",
-                    source_album_id,
-                    meta["artist"],
-                    meta["title"],
-                )
-            item = {
-                "id": str(uuid.uuid4()),
-                "album_db_id": album["id"],
-                "source": source,
-                "source_album_id": source_album_id,
-                "title": album["title"],
-                "artist": album["artist"],
-                "cover_url": album.get("cover_url"),
-                "track_count": album.get("track_count", 0),
-                "tracks_done": 0,
-                "bytes_done": 0,
-                "bytes_total": 0,
-                "speed": 0.0,
-                "status": "pending",
-                "force": force,
-            }
-            self._queue.append(item)
-            self.db.update_album_status(album["id"], "queued")
-            items.append(item)
+        return await self._enqueue(
+            source,
+            album_ids,
+            force=force,
+            supplied_metadata=supplied_metadata,
+        )
 
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._process_queue())
+    async def _enqueue(
+        self,
+        source: str,
+        album_ids: list[str],
+        force: bool = False,
+        supplied_metadata: dict[str, dict] | None = None,
+    ) -> list[dict]:
+        if self._stopping:
+            raise DownloadServiceStoppingError("Download service is shutting down")
+        items = []
+        errors: list[Exception] = []
+        supplied_metadata = supplied_metadata or {}
+        try:
+            for source_album_id in album_ids:
+                if self._stopping:
+                    errors.append(
+                        DownloadServiceStoppingError(
+                            "Download service is shutting down"
+                        )
+                    )
+                    break
+                # One unresolvable album must not abort the batch: the albums
+                # queued ahead of it are already marked "queued" in the DB, and
+                # bailing out here would strand them with no worker started.
+                try:
+                    album = self.db.get_album_by_source_id(source, source_album_id)
+                    if album is None:
+                        # Prefer metadata supplied by the caller (e.g. search
+                        # results already carry title/artist/cover). Only
+                        # round-trip to the streaming service when the caller
+                        # has nothing for us.
+                        supplied = supplied_metadata.get(source_album_id)
+                        if supplied is not None:
+                            meta = {
+                                "title": supplied["title"],
+                                "artist": supplied["artist"],
+                                "cover_url": supplied.get("cover_url"),
+                                "track_count": supplied.get("track_count"),
+                                "release_date": supplied.get("release_date"),
+                            }
+                        else:
+                            meta = await self._fetch_album_metadata(
+                                source, source_album_id
+                            )
+                        if self._stopping:
+                            raise DownloadServiceStoppingError(
+                                "Download service is shutting down"
+                            )
+                        album_id = self.db.upsert_album(
+                            source=source,
+                            source_album_id=source_album_id,
+                            title=meta["title"],
+                            artist=meta["artist"],
+                            cover_url=meta.get("cover_url"),
+                            track_count=meta.get("track_count"),
+                            release_date=meta.get("release_date"),
+                            added_to_library_at=datetime.now().isoformat(),
+                        )
+                        album = self.db.get_album(album_id)
+                        if album is None:
+                            logger.warning(
+                                "Failed to create album entry for %s", source_album_id
+                            )
+                            continue
+                        logger.info(
+                            "Auto-created album entry for %s: %s — %s",
+                            source_album_id,
+                            meta["artist"],
+                            meta["title"],
+                        )
+                    item = {
+                        "id": str(uuid.uuid4()),
+                        "album_db_id": album["id"],
+                        "source": source,
+                        "source_album_id": source_album_id,
+                        "title": album["title"],
+                        "artist": album["artist"],
+                        "cover_url": album.get("cover_url"),
+                        "track_count": album.get("track_count", 0),
+                        "tracks_done": 0,
+                        "bytes_done": 0,
+                        "bytes_total": 0,
+                        "speed": 0.0,
+                        "status": "pending",
+                        "force": force,
+                    }
+                    self._queue.append(item)
+                    self.db.update_album_status(album["id"], "queued")
+                    items.append(item)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to enqueue album %s/%s", source, source_album_id
+                    )
+                    errors.append(exc)
+                    continue
+        finally:
+            # In a `finally` so whatever did get queued always gets a worker,
+            # even if the loop exits early.
+            if (
+                not self._stopping
+                and any(q["status"] == "pending" for q in self._queue)
+                and (self._worker_task is None or self._worker_task.done())
+            ):
+                self._worker_task = asyncio.create_task(self._process_queue())
+
+        # A batch in which *nothing* could be queued is still a loud failure —
+        # surfacing the first error keeps auth/network problems visible instead
+        # of returning an empty list the UI would read as "nothing to do".
+        if errors and not items:
+            raise errors[0]
         return items
 
     def get_queue(self) -> list[dict]:
         return list(self._queue)
 
+    def has_unfinished_for_sources(self, sources) -> bool:
+        """Return whether queued/current work still owns a source client."""
+        source_set = set(sources)
+        return any(
+            item["source"] in source_set
+            and item["status"] in ("pending", "downloading")
+            for item in self._queue
+        )
+
+    def _prune_queue(self) -> None:
+        """Bound the in-memory queue after an item reaches a terminal state.
+
+        Finished items used to stay in ``_queue`` for the life of the
+        process: ``GET /api/downloads/queue`` re-serialised every one of
+        them on each poll and ``_process_queue`` rescanned the whole list
+        each iteration.  Keep every live item and only the most recent
+        finished ones — the route merges durable history from the DB.
+        """
+        terminal = [i for i in self._queue if i["status"] in TERMINAL_STATUSES]
+        excess = len(terminal) - MAX_TERMINAL_QUEUE_ITEMS
+        if excess <= 0:
+            return
+        # Oldest first: the queue preserves enqueue order.
+        dropped = {i["id"] for i in terminal[:excess]}
+        self._queue = [i for i in self._queue if i["id"] not in dropped]
+
     async def cancel(self, item_ids: list[str]):
         for item_id in item_ids:
-            self._cancel_requested.add(item_id)
             for item in self._queue:
-                if item["id"] == item_id and item["status"] in (
+                if item["id"] != item_id or item["status"] not in (
                     "pending",
                     "downloading",
                 ):
-                    item["status"] = "cancelled"
-                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
+                    continue
+                if item["status"] == "downloading":
+                    # The SDK can't be interrupted mid-album, so record the
+                    # request and let the worker re-check it once the download
+                    # returns. Only in-flight items need this: a pending item
+                    # is skipped on status alone, and recording its ID would
+                    # leak it for the life of the process, since the worker
+                    # never visits that item again.
+                    self._cancel_requested.add(item_id)
+                item["status"] = "cancelled"
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
 
     async def cancel_all(self):
         ids = [
@@ -197,66 +371,184 @@ class DownloadService:
         ]
         await self.cancel(ids)
 
-    async def _process_queue(self):
-        while True:
-            pending = [item for item in self._queue if item["status"] == "pending"]
-            if not pending:
-                break
-            item = pending[0]
-            if item["id"] in self._cancel_requested:
-                item["status"] = "cancelled"
-                self._cancel_requested.discard(item["id"])
+    def _settle_pending_for_shutdown(self) -> list[tuple[str, BaseException]]:
+        errors: list[tuple[str, BaseException]] = []
+        for item in self._queue:
+            if item["status"] != "pending":
                 continue
+            item["status"] = "cancelled"
+            try:
+                self.db.update_album_status(item["album_db_id"], "not_downloaded")
+            except Exception as error:
+                errors.append(
+                    (f"pending album {item['source_album_id']} status", error)
+                )
+        return errors
 
-            item["status"] = "downloading"
-            self.db.update_album_status(item["album_db_id"], "downloading")
-            await self.event_bus.publish(
-                "download_progress",
-                {
-                    "item_id": item["id"],
-                    "status": "downloading",
-                    "tracks_done": 0,
-                    "track_count": item["track_count"],
-                },
+    def begin_shutdown(self) -> None:
+        """Synchronously close admission before the shutdown coroutine yields."""
+        self._stopping = True
+
+    @staticmethod
+    def _log_shutdown_error(operation: str, error: BaseException) -> None:
+        logger.error(
+            "Download shutdown could not finish %s",
+            operation,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    async def _drain_shutdown(self) -> None:
+        errors: list[tuple[str, BaseException]] = []
+        try:
+            errors.extend(self._settle_pending_for_shutdown())
+        except Exception as error:
+            errors.append(("pending queue settlement", error))
+        worker = self._worker_task
+        if worker is not None and not worker.done():
+            active = next(
+                (item for item in self._queue if item["status"] == "downloading"),
+                None,
+            )
+            if active is not None:
+                logger.info(
+                    "Shutdown waiting for current album download to finish: %s",
+                    active["title"],
+                )
+        if worker is not None:
+            results = await asyncio.gather(worker, return_exceptions=True)
+            errors.extend(
+                ("download worker", result)
+                for result in results
+                if isinstance(result, BaseException)
+            )
+        if worker is not None and worker.done() and self._worker_task is worker:
+            self._worker_task = None
+
+        while self._progress_tasks:
+            tasks = tuple(self._progress_tasks)
+            logger.info(
+                "Shutdown waiting for %d download progress event task(s)", len(tasks)
+            )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            self._progress_tasks.difference_update(tasks)
+            errors.extend(
+                ("download progress event", result)
+                for result in results
+                if isinstance(result, BaseException)
             )
 
-            try:
-                await self._download_album(item)
+        for operation, error in errors:
+            self._log_shutdown_error(operation, error)
 
-                # Re-check cancellation: the user may have cancelled while
-                # _download_album was running. The SDK doesn't support mid-
-                # flight interruption, but we can at least avoid marking the
-                # item as "complete" — treat it as cancelled so the UI shows
-                # the correct state and the album status reverts.
+    async def shutdown(self) -> None:
+        """Stop admission and drain every owned task despite caller cancellation."""
+        self.begin_shutdown()
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._drain_shutdown())
+        await await_task_completion(
+            self._shutdown_task,
+            operation="download service shutdown",
+        )
+
+    async def _process_queue(self):
+        try:
+            while True:
+                if self._stopping:
+                    break
+                pending = [item for item in self._queue if item["status"] == "pending"]
+                if not pending:
+                    break
+                item = pending[0]
                 if item["id"] in self._cancel_requested:
-                    self._cancel_requested.discard(item["id"])
                     item["status"] = "cancelled"
-                    self.db.update_album_status(item["album_db_id"], "not_downloaded")
-                    logger.info(
-                        "Download of %s cancelled after completion", item["title"]
-                    )
-                else:
-                    item["status"] = "complete"
+                    self._cancel_requested.discard(item["id"])
+                    self._prune_queue()
+                    continue
+
+                item["status"] = "downloading"
+                self.db.update_album_status(item["album_db_id"], "downloading")
+                await self.event_bus.publish(
+                    "download_progress",
+                    {
+                        "item_id": item["id"],
+                        "status": "downloading",
+                        "tracks_done": 0,
+                        "track_count": item["track_count"],
+                    },
+                )
+
+                try:
+                    if self.client_operations is None:
+                        await self._download_album(item)
+                    else:
+                        with self.client_operations.operation({item["source"]}):
+                            await self._download_album(item)
+
+                    # Re-check cancellation: the user may have cancelled while
+                    # _download_album was running. The SDK doesn't support mid-
+                    # flight interruption, but we can at least avoid marking the
+                    # item as "complete" — treat it as cancelled so the UI shows
+                    # the correct state and the album status reverts.
+                    if item["id"] in self._cancel_requested:
+                        self._cancel_requested.discard(item["id"])
+                        item["status"] = "cancelled"
+                        self.db.update_album_status(
+                            item["album_db_id"], "not_downloaded"
+                        )
+                        logger.info(
+                            "Download of %s cancelled after completion", item["title"]
+                        )
+                    else:
+                        item["status"] = "complete"
+                        # Record the folder the SDK wrote to alongside the status:
+                        # without it ``unmark_album_downloaded`` has no path and
+                        # leaves the SDK's .streamrip.json sentinel behind, which
+                        # hides the folder from every later scan.
+                        # ``set_album_download_state`` COALESCEs the path, so a
+                        # None keeps whatever a previous scan recorded.
+                        self.db.set_album_download_state(
+                            item["album_db_id"],
+                            downloaded_at=datetime.now().isoformat(),
+                            local_folder_path=item.get("local_folder_path"),
+                        )
+                        await self.event_bus.publish(
+                            "download_complete",
+                            {
+                                "item_id": item["id"],
+                                "title": item["title"],
+                                "artist": item["artist"],
+                            },
+                        )
+                except Exception as e:
+                    logger.exception("Download failed for %s", item["title"])
+                    item["status"] = "failed"
+                    # Persist the failure (with a timestamp, which is what
+                    # get_recent_downloads filters on) so the download history
+                    # still shows it after a restart. "failed" is not terminal:
+                    # enqueue looks albums up by source id, never by status, so
+                    # the album stays re-queueable.
                     self.db.update_album_status(
                         item["album_db_id"],
-                        "complete",
+                        "failed",
                         downloaded_at=datetime.now().isoformat(),
                     )
                     await self.event_bus.publish(
-                        "download_complete",
-                        {
-                            "item_id": item["id"],
-                            "title": item["title"],
-                            "artist": item["artist"],
-                        },
+                        "download_failed", {"item_id": item["id"], "error": str(e)}
                     )
-            except Exception as e:
-                logger.exception("Download failed for %s", item["title"])
-                item["status"] = "failed"
-                self.db.update_album_status(item["album_db_id"], "not_downloaded")
-                await self.event_bus.publish(
-                    "download_failed", {"item_id": item["id"], "error": str(e)}
-                )
+                finally:
+                    # The item is terminal either way: drop any cancel request
+                    # still pending against it (nothing else ever removes IDs for
+                    # items that finished before the request landed) and keep the
+                    # queue bounded.
+                    self._cancel_requested.discard(item["id"])
+                    self._prune_queue()
+        finally:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if self._worker_task is current:
+                self._worker_task = None
 
     def _build_dl_config_kwargs(
         self,
@@ -325,6 +617,11 @@ class DownloadService:
         else:
             raise ValueError(f"Unsupported source: {source}")
 
+        catalog_track_ids = await resolve_album_track_ids(
+            self.db, self.clients, item["album_db_id"]
+        )
+        item["track_count"] = len(catalog_track_ids)
+
         # Quality is per-source (each streaming service has its own tier scale).
         quality_key = f"{source}_quality"
         quality = 3
@@ -336,12 +633,7 @@ class DownloadService:
         # Qobuz keeps the legacy name to preserve existing dedup state on disk.
         downloads_db = None
         if not item.get("force"):
-            db_dir = (
-                os.path.dirname(
-                    os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
-                )
-                or "data"
-            )
+            db_dir = resolve_database_dir(self.db)
             db_filename = (
                 "downloads.db" if source == "qobuz" else f"downloads-{source}.db"
             )
@@ -363,8 +655,15 @@ class DownloadService:
         # list at emit time.
         track_statuses_by_num: dict[int, dict] = {}
         last_emit = [0.0]
-        # Per-track download start time, for per-track speed calculations
-        track_start_times: dict[int, float] = {}
+        # Per-track byte counters keyed by track number.  Each callback
+        # carries *that* track's absolute counters, so writing them straight
+        # onto the shared item made the album totals jump between whichever
+        # of the concurrently downloading tracks reported last.  Keep them
+        # apart and publish the sums.
+        track_bytes: dict[int, tuple[int, int]] = {}
+        # When the album's first track started — the album-wide rate is
+        # measured from there, not per track.
+        album_start_time: list[float | None] = [None]
 
         def _render_statuses() -> list[dict]:
             return [
@@ -375,9 +674,9 @@ class DownloadService:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # Fire-and-forget progress emit from an SDK sync callback;
-                    # no handle needed — any error is swallowed by the except below.
-                    loop.create_task(  # noqa: RUF006
+                    # SDK callbacks are synchronous, so publish in an owned task.
+                    # Shutdown drains these before client transports are closed.
+                    task = loop.create_task(
                         event_bus.publish(
                             "download_progress",
                             {
@@ -393,6 +692,8 @@ class DownloadService:
                             },
                         )
                     )
+                    self._progress_tasks.add(task)
+                    task.add_done_callback(self._progress_tasks.discard)
             except Exception:
                 pass
 
@@ -404,21 +705,27 @@ class DownloadService:
                 "status": "downloading",
                 "progress": 0,
             }
-            track_start_times[num] = _time.monotonic()
+            if album_start_time[0] is None:
+                album_start_time[0] = _time.monotonic()
             _emit_progress()
 
         def on_track_progress(num: int, bytes_done: int, bytes_total: int):
-            queue_item["bytes_done"] = bytes_done
-            queue_item["bytes_total"] = bytes_total
+            track_bytes[num] = (bytes_done, bytes_total)
+            album_done = sum(done for done, _ in track_bytes.values())
+            queue_item["bytes_done"] = album_done
+            queue_item["bytes_total"] = sum(total for _, total in track_bytes.values())
 
             status = track_statuses_by_num.get(num)
             if status is not None and bytes_total > 0:
                 status["progress"] = min(100, round(bytes_done / bytes_total * 100))
 
-            # Speed for *this* track (per-track, not the album-wide last call)
-            start = track_start_times.get(num, _time.monotonic())
+            # One album-wide rate: everything downloaded so far over the time
+            # since the album's first track started.
+            start = album_start_time[0]
+            if start is None:
+                start = album_start_time[0] = _time.monotonic()
             elapsed = _time.monotonic() - start
-            speed = (bytes_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+            speed = (album_done / elapsed / (1024 * 1024)) if elapsed > 0 else 0
             queue_item["speed"] = round(speed, 2)
 
             # Throttle WebSocket events to every 0.5s
@@ -455,30 +762,40 @@ class DownloadService:
 
         result = await downloader.download(item["source_album_id"])
 
-        item["track_count"] = result.total
         item["tracks_done"] = result.successful
+        item["local_folder_path"] = _album_folder_from_result(result)
 
-        # Update album metadata in DB with resolved data from download
+        # Update album metadata in DB with resolved data from download.
+        # This is a narrow UPDATE, not an upsert: upsert_album overwrites
+        # cover_url/release_date/label/genre/duration_seconds/quality with the
+        # None of every omitted kwarg, which used to wipe the cover art off
+        # every album the moment its download finished.
         if result.title and result.artist:
-            self.db.upsert_album(
-                source=item["source"],
-                source_album_id=item["source_album_id"],
+            self.db.update_album_resolved_metadata(
+                item["album_db_id"],
                 title=result.title,
                 artist=result.artist,
-                track_count=result.total,
+                track_count=len(catalog_track_ids),
             )
             item["title"] = result.title
             item["artist"] = result.artist
 
-        # Update track statuses in web DB
-        self._update_track_statuses_from_result(item, result)
-
-        # Check 80% success threshold
+        # Check the 80% success threshold BEFORE writing track statuses back:
+        # a sub-threshold album is treated as failed, so its track rows must
+        # not be left claiming "complete".
         if result.total > 0 and result.success_rate < 0.8:
+            # The SDK already wrote its sentinel for the tracks that did
+            # succeed. Remove it so the fuzzy scan can still classify this
+            # folder later. Dedup rows are deliberately left in place: they
+            # are accurate for those tracks and let a retry skip them.
+            _remove_album_sentinel(item.get("local_folder_path"))
             raise RuntimeError(
                 f"Only {result.successful}/{result.total} tracks downloaded "
                 f"({result.success_rate:.0%}), below 80% threshold"
             )
+
+        # Update track statuses in web DB
+        self._update_track_statuses_from_result(item, result)
 
         logger.info(
             "Download complete: %s - %s (%d/%d tracks)",

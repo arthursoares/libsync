@@ -139,3 +139,41 @@ class TestDownloadAlbumIntegration:
         }
         with pytest.raises(ValueError, match="No client for source"):
             await service._download_album(item)
+
+
+class TestEnqueueResilience:
+    """One unresolvable album must not strand the rest of the batch.
+
+    ``enqueue`` marks each album "queued" in the DB as it goes but only
+    starts the worker after the loop, so an exception part-way through
+    used to leave the earlier albums queued forever with nothing to
+    process them.
+    """
+
+    async def test_failing_album_does_not_strand_the_batch(self, db, event_bus):
+        db.upsert_album("qobuz", "a1", "Album A", "Artist A")
+        db.upsert_album("qobuz", "a3", "Album C", "Artist C")
+        service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
+
+        async def fake_fetch(source, source_album_id):
+            raise RuntimeError(f"boom for {source_album_id}")
+
+        service._fetch_album_metadata = fake_fetch
+
+        # "a2" is absent from the DB and has no supplied metadata, so it
+        # falls through to _fetch_album_metadata and raises.
+        items = await service.enqueue("qobuz", ["a1", "a2", "a3"])
+
+        assert [i["source_album_id"] for i in items] == ["a1", "a3"]
+        assert db.get_album_by_source_id("qobuz", "a1")["download_status"] == "queued"
+        assert db.get_album_by_source_id("qobuz", "a3")["download_status"] == "queued"
+        assert db.get_album_by_source_id("qobuz", "a2") is None
+        # The worker must have been started for what did get queued.
+        assert service._worker_task is not None
+
+    async def test_all_albums_failing_still_raises(self, db, event_bus):
+        """A batch where nothing could be queued stays a loud failure —
+        an empty list would read as "nothing to do" in the UI."""
+        service = DownloadService(db, event_bus, clients={}, download_path="/tmp")
+        with pytest.raises(ValueError, match="No client configured"):
+            await service.enqueue("qobuz", ["nope-1", "nope-2"])

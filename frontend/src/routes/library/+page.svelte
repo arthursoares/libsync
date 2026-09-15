@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import AlbumGrid from '$lib/components/AlbumGrid.svelte';
   import AlbumTable from '$lib/components/AlbumTable.svelte';
   import AlbumDetail from '$lib/components/AlbumDetail.svelte';
@@ -8,9 +8,12 @@
     totalAlbums,
     currentSource,
     selectedAlbum,
+    selectAlbum,
     loadAlbumDetail,
+    clearAlbumDetail,
   } from '$lib/stores/library';
   import { api } from '$lib/api/client';
+  import { enqueueDownloads } from '$lib/stores/downloads';
   import { isSourceAuthenticated } from '$lib/auth-ui-logic.js';
 
   let albumList = $derived($albums);
@@ -31,6 +34,11 @@
   const PAGE_SIZE = 60;
   let viewMode = $state<'grid' | 'table'>('grid');
 
+  // Monotonic token guarding against out-of-order responses (issue #43):
+  // a slower, older fetchAlbums() call must not clobber a newer one's
+  // results when source/sort/filter change in quick succession.
+  let reqSeq = 0;
+
   // Library filter (local DB search)
   let librarySearch = $state('');
   let libraryDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -39,6 +47,7 @@
   let selectMode = $state(false);
   let selectedAlbums = $state<Set<string>>(new Set());
   let batchDownloading = $state(false);
+  let batchRequest = 0;
 
   function toggleSelectMode() {
     selectMode = !selectMode;
@@ -60,18 +69,21 @@
   }
 
   async function downloadSelected() {
-    if (selectedAlbums.size === 0) return;
+    if (selectedAlbums.size === 0 || batchDownloading) return;
+    const request = ++batchRequest;
     batchDownloading = true;
     try {
-      await api.downloads.enqueue(source, [...selectedAlbums]);
+      await enqueueDownloads(source, [...selectedAlbums]);
+      if (request !== batchRequest) return;
       selectedAlbums = new Set();
       selectMode = false;
     } finally {
-      batchDownloading = false;
+      if (request === batchRequest) batchDownloading = false;
     }
   }
 
   async function fetchAlbums(append = false) {
+    const seq = ++reqSeq;
     if (append) {
       loadingMore = true;
     } else {
@@ -87,6 +99,7 @@
       if (filter !== 'all') params['status'] = filter;
       if (librarySearch.trim()) params['search'] = librarySearch.trim();
       const data = await api.library.getAlbums(source, params);
+      if (seq !== reqSeq) return;
       if (append) {
         $albums = [...$albums, ...data.albums];
       } else {
@@ -96,8 +109,10 @@
     } catch (err) {
       console.error('Failed to load albums', err);
     } finally {
-      loading = false;
-      loadingMore = false;
+      if (seq === reqSeq) {
+        loading = false;
+        loadingMore = false;
+      }
     }
   }
 
@@ -139,11 +154,12 @@
 
 
   async function handleSelectAlbum(album: any) {
-    $selectedAlbum = album;
+    if (album.source && album.source !== source) return;
+    selectAlbum({ ...album, source: album.source ?? source });
     detailOpen = true;
     if (album.id && album.id > 0) {
       try {
-        await loadAlbumDetail(source, album.id);
+        await loadAlbumDetail(album.source ?? source, album.id);
       } catch (err) {
         console.error('Failed to load album detail', err);
       }
@@ -152,6 +168,7 @@
 
   function closeDetail() {
     detailOpen = false;
+    clearAlbumDetail();
   }
 
   async function downloadAllNew() {
@@ -161,7 +178,7 @@
     });
     if (newAlbums.length === 0) return;
     try {
-      await api.downloads.enqueue(
+      await enqueueDownloads(
         source,
         newAlbums.map((a) => a.source_album_id || String(a.id))
       );
@@ -169,6 +186,21 @@
       console.error('Failed to queue downloads', err);
     }
   }
+
+  $effect(() => {
+    source;
+    untrack(() => {
+      selectedAlbums = new Set();
+      selectMode = false;
+      batchRequest++;
+      batchDownloading = false;
+      closeDetail();
+      $albums = [];
+      $totalAlbums = 0;
+    });
+  });
+
+  onDestroy(clearAlbumDetail);
 
   // Reload when source, sort, or filter changes.
   // IMPORTANT: the reload body reads `currentPage` indirectly (via

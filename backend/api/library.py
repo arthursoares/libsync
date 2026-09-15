@@ -2,36 +2,90 @@
 
 import asyncio
 import logging
-import os
+import sqlite3
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..models.database import (
+    AlbumDownloadStateConflictError,
+    AlbumDownloadStateError,
+    AlbumNotFoundError,
+)
 from ..models.schemas import MarkDownloadedRequest
 from ..services import scan as scan_service
+from ..services.download import _parse_bool
+from ..services.paths import resolve_database_dir, resolve_downloads_root
 from ..services.scan import mark_album_downloaded, unmark_album_downloaded
+from ..services.tasks import run_thread_write
+from ..services.tracks import (
+    TrackClientUnavailableError,
+    TrackIdentityError,
+    resolve_album_track_ids,
+)
+from .lifecycle import (
+    claim_client_operation,
+    client_operation,
+    require_work_admission,
+)
 
 logger = logging.getLogger("streamrip")
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
 
-def _dedup_db_dir() -> str:
-    db_path = os.environ.get("STREAMRIP_DB_PATH", "data/streamrip.db")
-    return os.path.dirname(db_path) or "data"
+# How many finished scan jobs stay in the in-memory registry. The polling
+# endpoint reads it, so a small rolling window is enough — without a cap it
+# grows for the life of the process.
+MAX_FINISHED_SCAN_JOBS = 20
+TRACK_CLIENT_UNAVAILABLE_MESSAGE = "Connect the album source and retry."
+TRACK_IDENTITY_ERROR_MESSAGE = "Could not load a complete track catalog. Retry later."
+ALBUM_NOT_FOUND_MESSAGE = "Album not found"
+ALBUM_DOWNLOAD_STATE_CONFLICT_MESSAGE = (
+    "Album is queued or downloading. Wait for it to finish."
+)
+ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE = "Could not update album download state"
 
 
-def _resolve_downloads_root(db) -> str:
-    """Resolve the downloads root using the same chain as DownloadService:
-    DB config → STREAMRIP_DOWNLOADS_PATH env var → '/music' fallback.
+def _prune_scan_jobs(jobs: dict, *, active_job_id: str | None) -> None:
+    """Drop all but the most recently started finished scan jobs.
+
+    Never evicts the active job, nor any job still reporting "running".
+    ``dict`` preserves insertion order, so the oldest keys come first.
     """
-    return (
-        db.get_config("downloads_path")
-        or os.environ.get("STREAMRIP_DOWNLOADS_PATH")
-        or "/music"
+    finished = [
+        job_id
+        for job_id, job in jobs.items()
+        if job_id != active_job_id and job.get("status") != "running"
+    ]
+    excess = len(finished) - MAX_FINISHED_SCAN_JOBS
+    for job_id in finished[:excess] if excess > 0 else []:
+        jobs.pop(job_id, None)
+
+
+def _track_identity_error(error: TrackIdentityError) -> JSONResponse:
+    message = (
+        TRACK_CLIENT_UNAVAILABLE_MESSAGE
+        if isinstance(error, TrackClientUnavailableError)
+        else TRACK_IDENTITY_ERROR_MESSAGE
     )
+    return JSONResponse({"error": message}, status_code=error.status_code)
+
+
+def _download_state_error(error: Exception) -> JSONResponse:
+    if isinstance(error, AlbumNotFoundError):
+        return JSONResponse(
+            {"error": ALBUM_NOT_FOUND_MESSAGE}, status_code=error.status_code
+        )
+    if isinstance(error, AlbumDownloadStateConflictError):
+        return JSONResponse(
+            {"error": ALBUM_DOWNLOAD_STATE_CONFLICT_MESSAGE},
+            status_code=error.status_code,
+        )
+    logger.exception("Could not reconcile album download state")
+    return JSONResponse({"error": ALBUM_DOWNLOAD_STATE_ERROR_MESSAGE}, status_code=500)
 
 
 def _validate_local_folder_path(
@@ -45,7 +99,7 @@ def _validate_local_folder_path(
     """
     if raw is None:
         return None, None
-    downloads_root_cfg = _resolve_downloads_root(db)
+    downloads_root_cfg = resolve_downloads_root(db)
     try:
         resolved = Path(raw).resolve(strict=False)
         root = Path(downloads_root_cfg).resolve(strict=False)
@@ -75,6 +129,8 @@ async def get_albums(
     search: str | None = None,
 ):
     service = request.app.state.library_service
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
     return await service.get_albums(
         source,
         page=page,
@@ -89,7 +145,10 @@ async def get_albums(
 @router.get("/{source}/albums/{album_id}")
 async def get_album_detail(request: Request, source: str, album_id: int):
     service = request.app.state.library_service
-    result = await service.get_album_detail(album_id)
+    album = request.app.state.db.get_album(album_id)
+    operation_source = album["source"] if album is not None else source
+    with client_operation(request, {operation_source}):
+        result = await service.get_album_detail(album_id)
     if result is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
     return result
@@ -97,31 +156,49 @@ async def get_album_detail(request: Request, source: str, album_id: int):
 
 @router.post("/refresh/{source}")
 async def refresh_library(request: Request, source: str):
+    require_work_admission(request)
     service = request.app.state.library_service
-    return await service.refresh_library(source)
+    with client_operation(request, {source}):
+        return await service.refresh_library(source)
 
 
 @router.post("/albums/{album_id}/mark-downloaded")
 async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedRequest):
+    require_work_admission(request)
     db = request.app.state.db
-    if db.get_album(album_id) is None:
+    album = db.get_album(album_id)
+    if album is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
-    sentinel_enabled = (
-        db.get_config("scan_sentinel_write_enabled") or "True"
-    ) == "True"
+    sentinel_enabled = _parse_bool(
+        db.get_config("scan_sentinel_write_enabled"), default=True
+    )
 
     resolved_path, err = _validate_local_folder_path(db, body.local_folder_path)
     if err is not None:
         return err
 
-    mark_album_downloaded(
-        db,
-        album_id,
-        local_folder_path=resolved_path,
-        dedup_db_dir=_dedup_db_dir(),
-        sentinel_write_enabled=sentinel_enabled,
-    )
+    with client_operation(request, {album["source"]}):
+        try:
+            track_ids = await resolve_album_track_ids(
+                db, request.app.state._clients_ref, album_id
+            )
+        except TrackIdentityError as error:
+            return _track_identity_error(error)
+
+    try:
+        await run_thread_write(
+            mark_album_downloaded,
+            db,
+            album_id,
+            local_folder_path=resolved_path,
+            dedup_db_dir=resolve_database_dir(db),
+            track_ids=track_ids,
+            sentinel_write_enabled=sentinel_enabled,
+            operation="manual mark-downloaded write",
+        )
+    except (AlbumDownloadStateError, sqlite3.Error) as error:
+        return _download_state_error(error)
     await request.app.state.event_bus.publish(
         "album_status_changed",
         {"album_id": album_id, "status": "complete"},
@@ -131,15 +208,31 @@ async def mark_downloaded(request: Request, album_id: int, body: MarkDownloadedR
 
 @router.post("/albums/{album_id}/unmark-downloaded")
 async def unmark_downloaded(request: Request, album_id: int):
+    require_work_admission(request)
     db = request.app.state.db
-    if db.get_album(album_id) is None:
+    album = db.get_album(album_id)
+    if album is None:
         return JSONResponse({"error": "Album not found"}, status_code=404)
 
-    unmark_album_downloaded(
-        db,
-        album_id,
-        dedup_db_dir=_dedup_db_dir(),
-    )
+    with client_operation(request, {album["source"]}):
+        try:
+            track_ids = await resolve_album_track_ids(
+                db, request.app.state._clients_ref, album_id
+            )
+        except TrackIdentityError as error:
+            return _track_identity_error(error)
+
+    try:
+        await run_thread_write(
+            unmark_album_downloaded,
+            db,
+            album_id,
+            dedup_db_dir=resolve_database_dir(db),
+            track_ids=track_ids,
+            operation="manual unmark-downloaded write",
+        )
+    except (AlbumDownloadStateError, sqlite3.Error) as error:
+        return _download_state_error(error)
     await request.app.state.event_bus.publish(
         "album_status_changed",
         {"album_id": album_id, "status": "not_downloaded"},
@@ -149,6 +242,7 @@ async def unmark_downloaded(request: Request, album_id: int):
 
 @router.post("/scan-fuzzy")
 async def start_scan(request: Request):
+    require_work_admission(request)
     app = request.app
     if app.state.active_scan_job is not None:
         return JSONResponse(
@@ -156,18 +250,14 @@ async def start_scan(request: Request):
         )
 
     db = app.state.db
-    download_path = _resolve_downloads_root(db)
-    sentinel_enabled = (
-        db.get_config("scan_sentinel_write_enabled") or "True"
-    ) == "True"
+    download_path = resolve_downloads_root(db)
+    sentinel_enabled = _parse_bool(
+        db.get_config("scan_sentinel_write_enabled"), default=True
+    )
+
+    _prune_scan_jobs(app.state.scan_jobs, active_job_id=app.state.active_scan_job)
 
     job_id = uuid.uuid4().hex
-    app.state.scan_jobs[job_id] = {
-        "status": "running",
-        "progress": {"scanned": 0, "total": 0},
-        "result": None,
-    }
-    app.state.active_scan_job = job_id
 
     # Wrap the event bus so scan_progress events also update the in-memory
     # job registry — the polling GET endpoint reads that so the UI can show
@@ -194,12 +284,20 @@ async def start_scan(request: Request):
         try:
             result = await scan_service.run_scan(
                 db,
+                clients=app.state._clients_ref,
                 download_path=download_path,
-                dedup_db_dir=_dedup_db_dir(),
+                dedup_db_dir=resolve_database_dir(db),
                 event_bus=tracked_bus,
                 sentinel_write_enabled=sentinel_enabled,
+                stop_event=app.state.scan_stop_event,
             )
             app.state.scan_jobs[job_id] = {"status": "complete", "result": result}
+        except asyncio.CancelledError:
+            app.state.scan_jobs[job_id] = {
+                "status": "complete",
+                "result": {"status": "interrupted"},
+            }
+            raise
         except Exception:
             logger.exception("scan-fuzzy job %s failed", job_id)
             app.state.scan_jobs[job_id] = {
@@ -207,11 +305,33 @@ async def start_scan(request: Request):
                 "result": {"error": "Scan failed — see server logs"},
             }
         finally:
-            app.state.active_scan_job = None
+            if app.state.active_scan_job == job_id:
+                app.state.active_scan_job = None
 
-    task = asyncio.create_task(runner())
-    # Keep a strong reference so the task is not garbage-collected before completion.
-    app.state.scan_jobs[job_id]["_task"] = task
+    operation_claim = claim_client_operation(request, {"qobuz", "tidal"})
+    task = None
+    try:
+        app.state.scan_jobs[job_id] = {
+            "status": "running",
+            "progress": {"scanned": 0, "total": 0},
+            "result": None,
+        }
+        app.state.active_scan_job = job_id
+        task = asyncio.create_task(runner())
+        app.state.scan_tasks.add(task)
+        task.add_done_callback(app.state.scan_tasks.discard)
+        task.add_done_callback(
+            lambda _task: app.state.client_operations.release(operation_claim)
+        )
+    except BaseException:
+        if task is not None:
+            task.cancel()
+            app.state.scan_tasks.discard(task)
+        app.state.scan_jobs.pop(job_id, None)
+        if app.state.active_scan_job == job_id:
+            app.state.active_scan_job = None
+        app.state.client_operations.release(operation_claim)
+        raise
     return {"job_id": job_id}
 
 
@@ -250,7 +370,8 @@ async def search(
     page = max(1, page)
     page_size = max(1, min(page_size, 200))
     offset = (page - 1) * page_size
-    return await service.search(source, q, limit=page_size, offset=offset)
+    with client_operation(request, {source}):
+        return await service.search(source, q, limit=page_size, offset=offset)
 
 
 @router.get("/{source}/playlists")
@@ -261,14 +382,16 @@ async def list_playlists(request: Request, source: str):
     until the SDK gains playlist read methods.
     """
     service = request.app.state.library_service
-    return await service.list_playlists(source)
+    with client_operation(request, {source}):
+        return await service.list_playlists(source)
 
 
 @router.get("/{source}/playlists/{playlist_id}")
 async def get_playlist(request: Request, source: str, playlist_id: int):
     """Fetch a playlist with its track list."""
     service = request.app.state.library_service
-    result = await service.get_playlist(source, playlist_id)
+    with client_operation(request, {source}):
+        result = await service.get_playlist(source, playlist_id)
     if result is None:
         return JSONResponse({"error": "Playlist not found"}, status_code=404)
     return result

@@ -167,6 +167,7 @@ class ConfigUpdate(BaseModel):
     qobuz_app_secret: str | None = None
     qobuz_download_booklets: bool | None = None
     tidal_quality: int | None = None
+    tidal_access_token: str | None = None
     downloads_path: str | None = None
     max_connections: int | None = None
     source_subdirectories: bool | None = None

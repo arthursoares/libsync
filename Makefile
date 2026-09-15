@@ -52,6 +52,6 @@ dev-backend:
 dev-frontend:
 	cd frontend && npm run dev
 
-# Lint
+# Lint (matches CI's ruff job: check + format --check, over backend/ and tests/)
 lint:
-	poetry run ruff check backend/
+	poetry run ruff check backend/ tests/ && poetry run ruff format --check backend/ tests/

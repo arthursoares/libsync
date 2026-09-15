@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import DownloadQueue from '$lib/components/DownloadQueue.svelte';
-  import { queue, activeCount, totalSpeed, loadQueue } from '$lib/stores/downloads';
-  import { api } from '$lib/api/client';
+  import { queue, activeCount, totalSpeed, loadQueue, cancelAllDownloads } from '$lib/stores/downloads';
 
   let active = $derived($activeCount);
   let speed = $derived($totalSpeed);
@@ -22,7 +21,7 @@
     cancellingAll = true;
     cancelAllMessage = null;
     try {
-      await api.downloads.cancelAll();
+      await cancelAllDownloads();
       confirmCancelAll = false;
       cancelAllMessage = 'Cancelling active downloads';
       setTimeout(() => { cancelAllMessage = null; }, 4000);

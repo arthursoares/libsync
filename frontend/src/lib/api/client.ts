@@ -8,10 +8,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
+  options?.signal?.throwIfAborted();
   if (!resp.ok) {
     const errorText = await readApiErrorMessage(resp, `HTTP ${resp.status}`);
+    options?.signal?.throwIfAborted();
     addToast(`API error: ${errorText}`, 'error');
-    throw new Error(errorText);
+    throw Object.assign(new Error(errorText), { status: resp.status });
   }
   return resp.json();
 }
@@ -34,10 +36,10 @@ export const api = {
       request<any[]>(`/library/${source}/playlists`),
     getPlaylist: (source: string, id: number) =>
       request<any>(`/library/${source}/playlists/${id}`),
-    scanFuzzy: () =>
-      request<{ job_id: string }>('/library/scan-fuzzy', { method: 'POST' }),
-    scanFuzzyStatus: (jobId: string) =>
-      request<any>(`/library/scan-fuzzy/${jobId}`),
+    scanFuzzy: (signal?: AbortSignal) =>
+      request<{ job_id: string }>('/library/scan-fuzzy', { method: 'POST', signal }),
+    scanFuzzyStatus: (jobId: string, signal?: AbortSignal) =>
+      request<any>(`/library/scan-fuzzy/${jobId}`, { signal }),
     markDownloaded: (albumId: number, localFolderPath: string | null) =>
       request<any>(`/library/albums/${albumId}/mark-downloaded`, {
         method: 'POST',
@@ -81,6 +83,14 @@ export const api = {
     get: () => request<any>('/config'),
     update: (data: Record<string, unknown>) =>
       request<any>('/config', { method: 'PATCH', body: JSON.stringify(data) }),
+  },
+  sync: {
+    status: (source: string) => request<any>(`/sync/status/${source}`),
+    run: (source: string, options?: { downloadNew?: boolean }) => {
+      const qs = options?.downloadNew ? '?download_new=true' : '';
+      return request<any>(`/sync/run/${source}${qs}`, { method: 'POST' });
+    },
+    history: (source: string) => request<any[]>(`/sync/history?source=${source}`),
   },
   auth: {
     status: () => request<any[]>('/auth/status'),

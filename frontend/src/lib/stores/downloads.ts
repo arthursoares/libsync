@@ -1,6 +1,7 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import { onEvent } from './websocket';
+import { shouldReloadQueueForUnknownItem } from './downloads-logic.js';
 
 export const queue = writable<any[]>([]);
 export const activeCount = writable(0);
@@ -26,33 +27,91 @@ export const lastCompletedDownload = writable<Record<string, unknown> | null>(nu
 export const liveTrackStatuses = writable<Record<string, any[]>>({});
 
 let loadQueueDebounce: ReturnType<typeof setTimeout> | null = null;
+let queueRequest = 0;
+const terminalStatuses = new Set(['cancelled', 'complete', 'failed']);
+
+function updateQueueStats(items: any[]) {
+  const downloading = items.filter(i => i.status === 'downloading');
+  totalSpeed.set(downloading.reduce((sum: number, i: any) => sum + (i.speed ?? 0), 0));
+  activeCount.set(downloading.length);
+}
+
+// Mutations need an immediate, awaitable read, not the background debounce.
+export async function refreshQueue() {
+  if (loadQueueDebounce) clearTimeout(loadQueueDebounce);
+  loadQueueDebounce = null;
+  const request = ++queueRequest;
+  const data = await api.downloads.getQueue();
+  if (request === queueRequest) {
+    queue.set(data.items);
+    activeCount.set(data.active_count);
+    totalSpeed.set(data.total_speed);
+  }
+  return data;
+}
+
+export async function cancelDownload(id: string) {
+  await api.downloads.cancel(id);
+  await refreshQueue();
+}
+
+export async function cancelAllDownloads() {
+  await api.downloads.cancelAll();
+  await refreshQueue();
+}
 
 export async function loadQueue() {
   // Debounce — multiple events can fire simultaneously
   if (loadQueueDebounce) clearTimeout(loadQueueDebounce);
   loadQueueDebounce = setTimeout(async () => {
     try {
-      const data = await api.downloads.getQueue();
-      queue.set(data.items);
-      activeCount.set(data.active_count);
-      totalSpeed.set(data.total_speed);
+      await refreshQueue();
     } catch {
       // ignore — API may be unavailable briefly
     }
   }, 300);
 }
 
+/**
+ * Enqueue album(s) for download and refresh the queue store so the new
+ * pending item(s) show up without waiting for the next WebSocket event
+ * or a visit to the Downloads page. All call sites that enqueue downloads
+ * should go through this instead of calling `api.downloads.enqueue`
+ * directly, so the store — and therefore any UI reading from it — stays
+ * in sync. `api.downloads.enqueue` throws on a non-2xx response (and the
+ * shared client already toasts the error), so callers keep their existing
+ * try/catch UI behaviour.
+ */
+export async function enqueueDownloads(
+  source: string,
+  albumIds: string[],
+  options?: Parameters<typeof api.downloads.enqueue>[2],
+) {
+  const result = await api.downloads.enqueue(source, albumIds, options);
+  loadQueue();
+  return result;
+}
+
 onEvent('download_progress', (data) => {
+  let itemMissing = false;
   queue.update(items => {
+    itemMissing = shouldReloadQueueForUnknownItem(items, (data as any).item_id);
     const updated = items.map(item =>
-      item.id === data.item_id ? { ...item, ...data } : item
+      item.id === data.item_id && !terminalStatuses.has(item.status) ? { ...item, ...data } : item
     );
     // Update speed from all downloading items
-    const downloading = updated.filter(i => i.status === 'downloading');
-    totalSpeed.set(downloading.reduce((sum: number, i: any) => sum + (i.speed ?? 0), 0));
-    activeCount.set(downloading.length);
+    updateQueueStats(updated);
     return updated;
   });
+
+  if (itemMissing) {
+    // A progress event arrived for an item this client doesn't know about
+    // yet — e.g. this client's own enqueue debounce hasn't resolved, or
+    // another client/session enqueued it. Reload from the server instead
+    // of silently dropping the event (the .map() above is a no-op for an
+    // id it doesn't recognize).
+    loadQueue();
+  }
 
   // Mirror per-track statuses into liveTrackStatuses keyed by source_album_id
   // so AlbumDetail can render live progress without subscribing to the queue.
@@ -62,7 +121,7 @@ onEvent('download_progress', (data) => {
   if (Array.isArray(trackStatuses) && trackStatuses.length > 0) {
     queue.update(items => {
       const item = items.find(i => i.id === (data as any).item_id);
-      if (item?.source_album_id) {
+      if (item?.source_album_id && !terminalStatuses.has(item.status)) {
         liveTrackStatuses.update(map => ({
           ...map,
           [String(item.source_album_id)]: trackStatuses,
@@ -73,31 +132,44 @@ onEvent('download_progress', (data) => {
   }
 });
 
-onEvent('download_complete', (data) => {
-  queue.update(items =>
-    items.map(item =>
-      item.id === data.item_id ? { ...item, status: 'complete' } : item
-    )
-  );
-  // Drop live track statuses for this album so the next refetch gets
-  // the canonical DB state instead of the stale in-progress map.
-  queue.update(items => {
-    const item = items.find(i => i.id === (data as any).item_id);
-    if (item?.source_album_id) {
-      liveTrackStatuses.update(map => {
-        const next = { ...map };
-        delete next[String(item.source_album_id)];
-        return next;
-      });
+async function handleDownloadComplete(data: Record<string, unknown>) {
+  // item_id is a queue UUID, never a catalog album ID. Capture the join
+  // before a canonical reload can prune/replace the queue's live history.
+  let completed = get(queue).find(item => item.id === data.item_id);
+  queueRequest++; // A GET started before this event must not restore active state.
+  if (!completed) {
+    try {
+      const snapshot = await refreshQueue();
+      completed = snapshot.items.find((item: any) => item.id === data.item_id);
+    } catch {
+      return; // The API already reports the error; don't guess identity or retry forever.
     }
-    return items;
+  } else {
+    loadQueue();
+  }
+  if (!completed) return; // Pruned UUIDs cannot safely be joined by title or catalog ID.
+  queue.update(items => {
+    const updated = items.map(item => item.id === data.item_id ? { ...item, status: 'complete', speed: 0 } : item);
+    updateQueueStats(updated);
+    return updated;
   });
-  // Refresh full queue state from server after completion
-  loadQueue();
-  // Notify subscribers (e.g. AlbumDetail) about the completed download
-  // AlbumDetail subscribes to this and re-fetches the album data
-  lastCompletedDownload.set(data);
-});
+  if (completed.source_album_id) {
+    liveTrackStatuses.update(map => {
+      const next = { ...map };
+      delete next[String(completed.source_album_id)];
+      return next;
+    });
+  }
+  if (!completed.source || !completed.source_album_id) return;
+  lastCompletedDownload.set({
+    ...data,
+    source: completed.source,
+    source_album_id: String(completed.source_album_id),
+    album_db_id: completed.album_db_id,
+  });
+}
+
+onEvent('download_complete', (data) => { void handleDownloadComplete(data); });
 
 onEvent('download_failed', (data) => {
   queue.update(items =>

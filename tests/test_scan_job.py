@@ -1,6 +1,9 @@
 """End-to-end scan job over a synthetic music folder."""
 
+import sqlite3
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +15,16 @@ from backend.services.scan import run_scan
 def _touch(path: Path, content: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+def _album(folder: Path, track_count: int) -> None:
+    """Create an album-shaped folder holding `track_count` audio files.
+
+    The matcher only auto-matches when the folder's file count equals the
+    library album's track_count, so the counts here have to be honest.
+    """
+    for n in range(1, track_count + 1):
+        _touch(folder / f"{n:02d}.flac")
 
 
 @pytest.fixture
@@ -39,6 +52,30 @@ def library(tmp_path):
     return db
 
 
+@pytest.fixture
+def clients():
+    async def get_album_with_tracks(source_album_id):
+        count = {"1": 17, "2": 14}[source_album_id]
+        tracks = [
+            SimpleNamespace(
+                id=f"{source_album_id}-t{i}",
+                title=f"Track {i}",
+                performer=SimpleNamespace(name="The Beatles"),
+                track_number=i,
+                disc_number=1,
+                duration=180,
+                explicit=False,
+                isrc=None,
+            )
+            for i in range(1, count + 1)
+        ]
+        return SimpleNamespace(tracks_count=count), tracks
+
+    client = MagicMock()
+    client.catalog.get_album_with_tracks = AsyncMock(side_effect=get_album_with_tracks)
+    return {"qobuz": client}
+
+
 def _patch_mutagen(monkeypatch, specs: dict):
     """Patch mutagen.File to return fake tags keyed by first filename."""
     import backend.services.scan as scan_mod
@@ -61,11 +98,11 @@ def _patch_mutagen(monkeypatch, specs: dict):
 
 
 @pytest.mark.asyncio
-async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
+async def test_run_scan_classifies_folders(tmp_path, library, clients, monkeypatch):
     music = tmp_path / "music"
-    _touch(music / "The Beatles - Abbey Road" / "01.flac")
-    _touch(music / "The Beatles - Revolver" / "01.flac")
-    _touch(music / "Unknown Band - Whatever" / "01.flac")
+    _album(music / "The Beatles - Abbey Road", 17)
+    _album(music / "The Beatles - Revolver", 14)
+    _album(music / "Unknown Band - Whatever", 9)
 
     _patch_mutagen(
         monkeypatch,
@@ -84,6 +121,7 @@ async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
 
     result = await run_scan(
         library,
+        clients=clients,
         download_path=str(music),
         dedup_db_dir=str(tmp_path),
         event_bus=event_bus,
@@ -105,7 +143,45 @@ async def test_run_scan_classifies_folders(tmp_path, library, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch):
+async def test_run_scan_sends_partial_folder_to_review(
+    tmp_path, library, clients, monkeypatch
+):
+    """An interrupted download (3 of 17 files) must not be auto-marked."""
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 3)
+
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            }
+        },
+    )
+
+    result = await run_scan(
+        library,
+        clients=clients,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert result["auto_matched"] == []
+    assert len(result["review"]) == 1
+    reason = result["review"][0]["candidates"][0]["reason"]
+    assert "track_count_mismatch: local=3 library=17" in reason
+    # The album was left alone — no status flip, no dedup rows.
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_skips_sentineled_folders(
+    tmp_path, library, clients, monkeypatch
+):
     music = tmp_path / "music"
     album_dir = music / "The Beatles - Abbey Road"
     _touch(album_dir / "01.flac")
@@ -116,6 +192,7 @@ async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch)
 
     result = await run_scan(
         library,
+        clients=clients,
         download_path=str(music),
         dedup_db_dir=str(tmp_path),
         event_bus=event_bus,
@@ -129,11 +206,13 @@ async def test_run_scan_skips_sentineled_folders(tmp_path, library, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch):
+async def test_run_scan_walks_artist_album_layout(
+    tmp_path, library, clients, monkeypatch
+):
     music = tmp_path / "music"
     # Library seeds "Abbey Road" + "Revolver" by The Beatles in the library fixture.
-    _touch(music / "The Beatles" / "(1969) Abbey Road [FLAC-24-96]" / "01.flac")
-    _touch(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]" / "01.flac")
+    _album(music / "The Beatles" / "(1969) Abbey Road [FLAC-24-96]", 17)
+    _album(music / "The Beatles" / "(1966) Revolver [FLAC-24-96]", 14)
     _touch(music / "_tuning" / "TestSignal.wav")  # no artist folder above
 
     _patch_mutagen(
@@ -152,6 +231,7 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
 
     result = await run_scan(
         library,
+        clients=clients,
         download_path=str(music),
         dedup_db_dir=str(tmp_path),
         event_bus=event_bus,
@@ -163,6 +243,221 @@ async def test_run_scan_walks_artist_album_layout(tmp_path, library, monkeypatch
     assert auto_ids == {1, 2}
     assert any("_tuning" in u for u in result["unmatched"])
     assert result["scanned"] == 3
+
+
+@pytest.mark.asyncio
+async def test_run_scan_reports_failed_marks_and_keeps_going(
+    tmp_path, library, clients, monkeypatch
+):
+    """A single failing mark must not unwind the job or mark failed state."""
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _album(music / "The Beatles - Revolver", 14)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            },
+            "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 24},
+        },
+    )
+
+    dedup_path = tmp_path / "downloads.db"
+    conn = sqlite3.connect(dedup_path)
+    try:
+        conn.execute("CREATE TABLE downloads (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """CREATE TRIGGER fail_first_album
+               BEFORE INSERT ON downloads WHEN NEW.id LIKE '1-t%'
+               BEGIN SELECT RAISE(FAIL, 'dedup insert failed'); END"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = await run_scan(
+        library,
+        clients=clients,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    # The scan still completed and the healthy album was still marked.
+    assert result["status"] == "complete"
+    assert result["scanned"] == 2
+    assert [e["album_id"] for e in result["auto_matched"]] == [2]
+    assert library.get_album(2)["download_status"] == "complete"
+
+    # The casualty is reported rather than silently dropped.
+    assert len(result["failed"]) == 1
+    entry = result["failed"][0]
+    assert entry["album_id"] == 1
+    assert "Abbey Road" in entry["folder"]
+    assert "dedup insert failed" in entry["error"]
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+    conn = sqlite3.connect(dedup_path)
+    try:
+        dedup_ids = {
+            row[0] for row in conn.execute("SELECT id FROM downloads").fetchall()
+        }
+    finally:
+        conn.close()
+    assert all(not track_id.startswith("1-t") for track_id in dedup_ids)
+    assert sum(track_id.startswith("2-t") for track_id in dedup_ids) == 14
+
+
+@pytest.mark.asyncio
+async def test_run_scan_isolates_catalog_failure_and_marks_next_album(
+    tmp_path, library, clients, monkeypatch
+):
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _album(music / "The Beatles - Revolver", 14)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            },
+            "Revolver": {"albumartist": "The Beatles", "album": "Revolver", "_bd": 24},
+        },
+    )
+    catalog = clients["qobuz"].catalog.get_album_with_tracks
+    healthy = catalog.side_effect
+
+    async def fail_one(source_album_id):
+        if source_album_id == "1":
+            raise OSError("catalog offline")
+        return await healthy(source_album_id)
+
+    catalog.side_effect = fail_one
+
+    result = await run_scan(
+        library,
+        clients=clients,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert [entry["album_id"] for entry in result["failed"]] == [1]
+    assert "catalog offline" in result["failed"][0]["error"]
+    assert [entry["album_id"] for entry in result["auto_matched"]] == [2]
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+    assert library.get_album(2)["download_status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_rechecks_refreshed_authoritative_track_count(
+    tmp_path, library, clients, monkeypatch
+):
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            }
+        },
+    )
+    tracks = [
+        SimpleNamespace(
+            id=f"1-t{i}",
+            title=f"Track {i}",
+            performer=SimpleNamespace(name="The Beatles"),
+            track_number=i,
+            disc_number=1,
+            duration=180,
+            explicit=False,
+            isrc=None,
+        )
+        for i in range(1, 17)
+    ]
+    clients["qobuz"].catalog.get_album_with_tracks = AsyncMock(
+        return_value=(SimpleNamespace(tracks_count=16), tracks)
+    )
+
+    result = await run_scan(
+        library,
+        clients=clients,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert result["auto_matched"] == []
+    assert len(result["review"]) == 1
+    assert (
+        "track_count_mismatch: local=17 library=16"
+        in (result["review"][0]["candidates"][0]["reason"])
+    )
+    assert library.get_album(1)["track_count"] == 16
+    assert library.get_album(1)["download_status"] == "not_downloaded"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_does_filesystem_work_off_the_event_loop(
+    tmp_path, library, clients, monkeypatch
+):
+    """The directory walk and the per-folder sentinel probe are blocking
+    file-system calls — on a network mount they would freeze the API for the
+    whole scan, so both must happen in a worker thread."""
+    import backend.services.scan as scan_mod
+
+    music = tmp_path / "music"
+    _album(music / "The Beatles - Abbey Road", 17)
+    _patch_mutagen(
+        monkeypatch,
+        {
+            "Abbey Road": {
+                "albumartist": "The Beatles",
+                "album": "Abbey Road",
+                "_bd": 24,
+            }
+        },
+    )
+
+    loop_thread = threading.get_ident()
+    ran_on: dict[str, int] = {}
+    original_find = scan_mod._find_album_folders
+    original_inspect = scan_mod._inspect_folder
+
+    def spy_find(*args, **kwargs):
+        ran_on["find"] = threading.get_ident()
+        return original_find(*args, **kwargs)
+
+    def spy_inspect(*args, **kwargs):
+        ran_on["inspect"] = threading.get_ident()
+        return original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(scan_mod, "_find_album_folders", spy_find)
+    monkeypatch.setattr(scan_mod, "_inspect_folder", spy_inspect)
+
+    result = await run_scan(
+        library,
+        clients=clients,
+        download_path=str(music),
+        dedup_db_dir=str(tmp_path),
+        event_bus=AsyncMock(),
+        sentinel_write_enabled=False,
+    )
+
+    assert ran_on["find"] != loop_thread
+    assert ran_on["inspect"] != loop_thread
+    # Behaviour is unchanged by the thread hop.
+    assert {e["album_id"] for e in result["auto_matched"]} == {1}
 
 
 def test_find_album_folders_skips_unreadable_dirs(tmp_path):
