@@ -71,6 +71,16 @@ The `:latest` tag tracks stable releases. Swap to `:main` or `:dev` if you want 
 
 The container runs as a fixed non-root user (uid/gid `1000`), so the host directories you mount to `/music` and `/data` must be writable by that uid — run `sudo chown -R 1000:1000 ./music ./data` (or the paths you mounted) if they're currently owned by another user, e.g. `root` from before this change or from a fresh `mkdir`.
 
+When upgrading an existing installation, stop the app and back up its data first. If `/data` uses a named volume (such as `streamrip-data` in the Docker quick start), changing `./data` on the host does not change that volume. Repair its ownership separately:
+
+```bash
+docker run --rm --user 0 --entrypoint chown \
+  -v YOUR_DATA_VOLUME:/data \
+  ghcr.io/arthursoares/libsync:latest -R 1000:1000 /data
+```
+
+Replace `YOUR_DATA_VOLUME` with the actual volume name from `docker volume ls`; Compose may prefix it with the project name. Ensure the music mount and any custom download paths are writable by UID 1000 as well, then restart the app. New empty named volumes inherit the correct ownership automatically. See the [changelog](CHANGELOG.md) for version-specific upgrade notes.
+
 ## Quick start — local dev
 
 ```bash
