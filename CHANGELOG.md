@@ -4,25 +4,96 @@ All notable changes to Libsync are documented in this file. Release tags are ann
 
 ## Unreleased
 
+No changes yet.
+
+---
+
+## v0.0.7 — 2026-09-15
+
+Reliability release for downloads, library reconciliation, authentication, and the web UI, with a non-root Docker runtime. Includes all changes since v0.0.6.
+
+### Upgrade — Docker permissions required
+
+**The container now runs as UID/GID `1000:1000`.** Existing bind mounts and previously created named volumes must be writable by that user before upgrading. Stop the app and back up its data directory (including `streamrip.db`, `downloads.db`, and `downloads-tidal.db`) first. Existing music files are not moved or renamed.
+
+For the published-image Compose example, run these commands from the directory containing your Compose file. Substitute your actual host mount paths for `./data` and `./music`:
+
+```bash
+docker compose -f docker-compose.example.yml stop
+sudo chown -R 1000:1000 ./data ./music
+docker compose -f docker-compose.example.yml pull
+docker compose -f docker-compose.example.yml up -d
+```
+
+Equivalent filesystem permissions or ACLs are also sufficient; only change ownership on the directories dedicated to this deployment. Custom download paths must also be writable by UID 1000.
+
+If `/data` uses an existing named volume, migrate that volume's ownership separately while the app is stopped. Replace `YOUR_DATA_VOLUME` with the actual name shown by `docker volume ls` (Compose may prefix it with the project name):
+
+```bash
+docker run --rm --user 0 --entrypoint chown \
+  -v YOUR_DATA_VOLUME:/data \
+  ghcr.io/arthursoares/libsync:0.0.7 -R 1000:1000 /data
+```
+
+New empty named volumes inherit the correct ownership automatically. After startup, verify the container becomes `healthy` and that downloads can write to the music mount. The stable Docker tags are `ghcr.io/arthursoares/libsync:0.0.7` and `:latest`.
+
+Manual mark/unmark and scan reconciliation now require a connected source and a complete online track catalog. Unset or explicitly empty naming formats use the canonical Settings defaults; stored custom formats are preserved. Existing database names, environment variables, and sentinel filenames remain compatible. The internal Python package version (`3.0.0`) and frontend package version (`0.0.1`) remain independent of Libsync's release tags.
+
+### Added
+
+- **Sync Download Selected.** The New in Library selection now queues the chosen albums, and disconnected sources and sync failures have explicit states. ([#63](https://github.com/arthursoares/libsync/pull/63))
+- **Container health check.** Docker probes `/api/health` every 30 seconds using Python's standard library; the loopback probe ignores outbound proxy settings. ([#62](https://github.com/arthursoares/libsync/pull/62))
+
+### Changed
+
+- **Non-root Docker runtime.** The app runs as `libsync` (UID/GID 1000), with writable default data and music directories. See the required upgrade steps above. ([#62](https://github.com/arthursoares/libsync/pull/62))
+
 ### Fixed
 
-- **Tidal HiRes busy retry.** A busy response preserves the authorization handle and pasted redirect URL, allowing an explicit retry without restarting login.
-- **Scan polling lifecycle.** Scan status requests run sequentially and stop on close, navigation, or error. Missing jobs offer a fresh scan; connection failures offer an explicit status retry without repeated polling errors.
-- **Completion detail refresh.** Queue UUID completion events now resolve the album's source and catalog ID before refreshing matching open details; late progress cannot restore completed queue items.
-- **Cancellation feedback.** Individual and bulk cancellation now reload the canonical queue immediately, updating active counts without WebSocket traffic and ignoring late progress for cancelled items.
-- **Search pagination.** Load More appends the next page without triggering a page-one reload; changing services still reruns the active query from page one.
-- **Sync selection effect loop.** Initial selection notifications no longer track parent state; deselection stays intact and replacement sync results reseed once.
-- **Source-scoped selections and details.** Switching services clears Library and Search selections and detail panels; album actions use the album's source, and late detail responses cannot replace a newer selection.
-- **Detail refresh during status updates.** Same-album status events no longer discard pending track details or suppress mark/unmark refreshes; newer status is preserved when a pending detail response arrives.
-- **Settings load protection.** Save stays disabled until configuration loads successfully, with a visible retry action on failure and no partial form hydration during auth checks.
-- **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged.
-- **Tidal authentication transitions.** Completing device-code authentication now replaces a previously stored PKCE auth method, keeping persisted credentials and client initialization consistent.
-- **Reliable mark/unmark reconciliation.** Downloads now cache the complete authoritative track catalog before starting, while manual mark/unmark and fuzzy auto-mark refresh it online before changing album, sentinel, or dedup state. Mark/unmark now requires a connected source and fails clearly if the catalog is unavailable or incomplete.
-- **Atomic album/dedup updates.** Manual and scan mark/unmark now update album state and the per-source dedup database in one attached SQLite transaction, rolling both back on ordinary statement or lock failures. Best-effort sentinel writes and removals happen only after that mandatory commit.
-- **Safe legacy sentinel reconciliation.** The downloads scan now discovers Qobuz and Tidal sentinels itself, requires a complete online catalog and matching local audio set, records the actual folder, and uses the same atomic album/dedup update as manual and fuzzy reconciliation. Malformed, partial, offline, or unsafe folders are reported without aborting healthy entries.
-- **Owned shutdown drainage.** Shutdown now rejects new background work, drains the current album without advancing queued downloads, interrupts and records active syncs, cooperatively stops scans after cancellation-safe off-loop writes, waits for progress events, and only then closes current SDK clients. Repeated caller cancellation is propagated after the retained cleanup operation finishes.
-- **Transactional credential reloads.** Qobuz and Tidal credential changes now build, open, and validate replacement SDK clients before atomically persisting credentials and publishing them through the shared client map. Active source work returns HTTP 409 without being interrupted; failed or cancelled activation preserves the previous credentials and exact client objects.
-- **Consistent naming defaults.** Unset folder and track naming formats now use the same canonical defaults in Settings, the config API, and both source downloaders; explicitly stored custom formats remain unchanged.
+- **Tidal HiRes busy retry.** A busy response preserves the authorization handle and pasted redirect URL, allowing an explicit retry without restarting login. ([#93](https://github.com/arthursoares/libsync/pull/93))
+- **Scan polling lifecycle.** Scan status requests run sequentially and stop on close, navigation, or error. Missing jobs offer a fresh scan; connection failures offer an explicit status retry without repeated polling errors. ([#88](https://github.com/arthursoares/libsync/pull/88))
+- **Completion detail refresh.** Queue UUID completion events now resolve the album's source and catalog ID before refreshing matching open details; late progress cannot restore completed queue items. ([#87](https://github.com/arthursoares/libsync/pull/87))
+- **Cancellation feedback.** Individual and bulk cancellation now reload the canonical queue immediately, updating active counts without WebSocket traffic and ignoring late progress for cancelled items. ([#86](https://github.com/arthursoares/libsync/pull/86))
+- **Search pagination.** Load More appends the next page without triggering a page-one reload; changing services still reruns the active query from page one. ([#84](https://github.com/arthursoares/libsync/pull/84))
+- **Sync selection effect loop.** Initial selection notifications no longer track parent state; deselection stays intact and replacement sync results reseed once. ([#83](https://github.com/arthursoares/libsync/pull/83))
+- **Source-scoped selections and details.** Switching services clears Library and Search selections and detail panels; album actions use the album's source, and late detail responses cannot replace a newer selection. ([#82](https://github.com/arthursoares/libsync/pull/82))
+- **Detail refresh during status updates.** Same-album status events no longer discard pending track details or suppress mark/unmark refreshes; newer status is preserved when a pending detail response arrives. ([#82](https://github.com/arthursoares/libsync/pull/82))
+- **Settings load protection.** Save stays disabled until configuration loads successfully, with a visible retry action on failure and no partial form hydration during auth checks. ([#80](https://github.com/arthursoares/libsync/pull/80))
+- **Frontend development API proxy.** Vite now forwards same-origin HTTP and WebSocket API traffic to the backend on port 8080; production behavior is unchanged. ([#79](https://github.com/arthursoares/libsync/pull/79))
+- **Tidal authentication transitions.** Completing device-code authentication now replaces a previously stored PKCE auth method, keeping persisted credentials and client initialization consistent. ([#78](https://github.com/arthursoares/libsync/pull/78))
+- **Reliable mark/unmark reconciliation.** Downloads now cache the complete authoritative track catalog before starting, while manual mark/unmark and fuzzy auto-mark refresh it online before changing album, sentinel, or dedup state. Mark/unmark now requires a connected source and fails clearly if the catalog is unavailable or incomplete. ([#81](https://github.com/arthursoares/libsync/pull/81))
+- **Atomic album/dedup updates.** Manual and scan mark/unmark now update album state and the per-source dedup database in one attached SQLite transaction, rolling both back on ordinary statement or lock failures. Best-effort sentinel writes and removals happen only after that mandatory commit. ([#85](https://github.com/arthursoares/libsync/pull/85))
+- **Safe legacy sentinel reconciliation.** The downloads scan now discovers Qobuz and Tidal sentinels itself, requires a complete online catalog and matching local audio set, records the actual folder, and uses the same atomic album/dedup update as manual and fuzzy reconciliation. Malformed, partial, offline, or unsafe folders are reported without aborting healthy entries. ([#89](https://github.com/arthursoares/libsync/pull/89))
+- **Owned shutdown drainage.** Shutdown now rejects new background work, drains the current album without advancing queued downloads, interrupts and records active syncs, cooperatively stops scans after cancellation-safe off-loop writes, waits for progress events, and only then closes current SDK clients. Repeated caller cancellation is propagated after the retained cleanup operation finishes. ([#90](https://github.com/arthursoares/libsync/pull/90))
+- **Transactional credential reloads.** Qobuz and Tidal credential changes now build, open, and validate replacement SDK clients before atomically persisting credentials and publishing them through the shared client map. Active source work returns HTTP 409 without being interrupted; failed or cancelled activation preserves the previous credentials and exact client objects. ([#91](https://github.com/arthursoares/libsync/pull/91))
+- **Consistent naming defaults.** Unset folder and track naming formats now use the same canonical defaults in Settings, the config API, and both source downloaders; explicitly stored custom formats remain unchanged. ([#92](https://github.com/arthursoares/libsync/pull/92))
+- **Download integrity and retries.** Downloads preserve album artwork and metadata, isolate metadata failures within a batch, persist failed status across restarts, and retain track file metadata during status updates. The `all` library filter reports the correct total. ([#60](https://github.com/arthursoares/libsync/pull/60))
+- **Accurate download completion and progress.** Completed downloads record the album folder; below-threshold downloads remove misleading sentinels without discarding successful-track dedup records. Concurrent track byte progress is aggregated, and finished queue/scan history is bounded in memory. ([#65](https://github.com/arthursoares/libsync/pull/65))
+- **Responsive library sync and restart recovery.** Album writes are batched off the event loop, and startup clears orphaned queued/downloading states without automatically re-enqueueing them. ([#64](https://github.com/arthursoares/libsync/pull/64))
+- **Safer fuzzy scans.** Track-count mismatches go to review, folder walking runs off the event loop, and per-folder failures are reported without discarding healthy results. ([#56](https://github.com/arthursoares/libsync/pull/56))
+- **API lifecycle and validation.** Pagination is bounded, sentinel settings parse consistently, album status events reach WebSocket consumers, and client shutdown cleanup is explicit. ([#57](https://github.com/arthursoares/libsync/pull/57))
+- **Clearer frontend feedback.** Enqueue actions show feedback, album details display errors, stale source/query responses are ignored, and the WebSocket connection store tracks actual connection state. ([#55](https://github.com/arthursoares/libsync/pull/55), [#63](https://github.com/arthursoares/libsync/pull/63))
+
+### Internal
+
+- Updated the yanked aiohttp dependency, consolidated development dependencies, and capped Python support at `>=3.10,<3.14`. ([#58](https://github.com/arthursoares/libsync/pull/58))
+- Pinned Ruff to match CI, excluded non-product files from lint/build inputs, fixed branch build triggers, and removed the unused E2E job. ([#59](https://github.com/arthursoares/libsync/pull/59))
+- Expanded backend, frontend, WebSocket, authentication, and lifecycle regression coverage; refreshed maintainer guidance. ([#61](https://github.com/arthursoares/libsync/pull/61), [#16](https://github.com/arthursoares/libsync/pull/16))
+
+### Validation and known limitations
+
+- Combined release validation: 371 backend tests, 48 frontend tests, Ruff 0.16.5 lint/format, Svelte checks, and the production build passed.
+- Docker startup, UID/GID 1000 writes, HTTP health/frontend, proxy-independent health checks, and an existing-volume ownership migration passed using disposable volumes.
+- Live credentialed Qobuz/Tidal downloads were not exercised for this release.
+- Existing high-severity dependency alerts remain in frontend development tooling (nanoid, PostCSS, and Vite); these dependencies are not installed in the final Python runtime image. Track them in [Dependabot](https://github.com/arthursoares/libsync/security/dependabot).
+
+### Contributors
+
+Thanks to [Arthur Soares (@arthursoares)](https://github.com/arthursoares) for this release, including the final naming and container fixes ([#92](https://github.com/arthursoares/libsync/pull/92), [#62](https://github.com/arthursoares/libsync/pull/62)). All contributing PRs are linked above.
+
+### Commits since v0.0.6
+
+https://github.com/arthursoares/libsync/compare/v0.0.6...v0.0.7
 
 ---
 
