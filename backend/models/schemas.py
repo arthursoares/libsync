@@ -2,6 +2,11 @@
 
 from pydantic import BaseModel
 
+DEFAULT_FOLDER_FORMAT = (
+    "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
+)
+DEFAULT_TRACK_FORMAT = "{tracknumber:02}. {artist} - {title}{explicit}"
+
 
 class AlbumSummary(BaseModel):
     id: int
@@ -148,10 +153,8 @@ class AppConfig(BaseModel):
     max_connections: int = 6
     source_subdirectories: bool = False
     disc_subdirectories: bool = True
-    folder_format: str = (
-        "{albumartist}/({year}) {title} [{container}-{bit_depth}-{sampling_rate}]"
-    )
-    track_format: str = "{tracknumber:02}. {artist} - {title}{explicit}"
+    folder_format: str = DEFAULT_FOLDER_FORMAT
+    track_format: str = DEFAULT_TRACK_FORMAT
     embed_artwork: bool = True
     artwork_size: str = "large"
     auto_sync_enabled: bool = False
